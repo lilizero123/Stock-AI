@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,9 @@ type DataSourceInfo struct {
 	LastFail    time.Time
 	Disabled    bool
 	LastSuccess time.Time
+	LastLatency time.Duration
+	LastChecked time.Time
+	LastError   string
 }
 
 // MultiSourceManager 多数据源管理器
@@ -46,7 +50,7 @@ type MultiSourceManager struct {
 	currentIndex int
 	mu           sync.RWMutex
 	// 首次加载标志 - 首次加载时并行请求所有数据源
-	isFirstLoad  bool
+	isFirstLoad bool
 	// 轮询间隔（秒）
 	pollInterval int
 }
@@ -75,8 +79,8 @@ func NewMultiSourceManager() *MultiSourceManager {
 			SourceTHS:       {Name: "同花顺", Domain: "10jqka.com.cn", Priority: 6},
 		},
 		currentIndex: 0,
-		isFirstLoad:  true,  // 初始为首次加载模式
-		pollInterval: 10,    // 轮询间隔10秒
+		isFirstLoad:  true, // 初始为首次加载模式
+		pollInterval: 10,   // 轮询间隔10秒
 	}
 	return msm
 }
@@ -137,6 +141,28 @@ func (msm *MultiSourceManager) MarkSourceSuccess(source DataSource) {
 		info.FailCount = 0
 		info.Disabled = false
 		info.LastSuccess = time.Now()
+	}
+}
+
+func (msm *MultiSourceManager) recordProbe(source DataSource, start time.Time, err error) {
+	msm.mu.Lock()
+	defer msm.mu.Unlock()
+
+	info, ok := msm.sources[source]
+	if !ok {
+		return
+	}
+
+	now := time.Now()
+	info.LastChecked = now
+	if !start.IsZero() {
+		info.LastLatency = now.Sub(start)
+	}
+	if err == nil {
+		info.LastError = ""
+		info.LastSuccess = now
+	} else {
+		info.LastError = err.Error()
 	}
 }
 
@@ -517,7 +543,9 @@ func (msm *MultiSourceManager) parallelFetchGlobalIndices(sources []struct {
 	// 并行启动所有数据源请求
 	for _, s := range sources {
 		go func(src DataSource, fetch func() (map[string]*IndexData, error)) {
+			start := time.Now()
 			data, err := fetch()
+			msm.recordProbe(src, start, err)
 			resultChan <- result{data: data, source: src, err: err}
 		}(s.source, s.fetch)
 	}
@@ -551,7 +579,9 @@ func (msm *MultiSourceManager) pollFetchGlobalIndices(sources []struct {
 	// 找到对应的fetch函数
 	for _, s := range sources {
 		if s.source == nextSource {
+			start := time.Now()
 			data, err := s.fetch()
+			msm.recordProbe(s.source, start, err)
 			if err == nil && len(data) > 0 {
 				msm.MarkSourceSuccess(s.source)
 				return data, s.source, nil
@@ -566,7 +596,9 @@ func (msm *MultiSourceManager) pollFetchGlobalIndices(sources []struct {
 	// 当前数据源失败，尝试下一个
 	for _, s := range sources {
 		if s.source != nextSource && msm.IsSourceAvailable(s.source) {
+			start := time.Now()
 			data, err := s.fetch()
+			msm.recordProbe(s.source, start, err)
 			if err == nil && len(data) > 0 {
 				msm.MarkSourceSuccess(s.source)
 				return data, s.source, nil
@@ -959,7 +991,9 @@ func (msm *MultiSourceManager) parallelFetchAStock(sources []struct {
 	// 并行启动所有数据源请求
 	for _, s := range sources {
 		go func(src DataSource, fetch func([]string) (map[string]*models.StockPrice, error)) {
+			start := time.Now()
 			data, err := fetch(codes)
+			msm.recordProbe(src, start, err)
 			resultChan <- result{data: data, source: src, err: err}
 		}(s.source, s.fetch)
 	}
@@ -981,6 +1015,7 @@ func (msm *MultiSourceManager) parallelFetchAStock(sources []struct {
 
 	if len(bestResult.data) > 0 {
 		msm.MarkSourceSuccess(bestResult.source)
+		msm.SetFirstLoadComplete()
 		return bestResult.data, bestResult.source, nil
 	}
 
@@ -998,7 +1033,9 @@ func (msm *MultiSourceManager) pollFetchAStock(sources []struct {
 	// 找到对应的fetch函数
 	for _, s := range sources {
 		if s.source == nextSource {
+			start := time.Now()
 			data, err := s.fetch(codes)
+			msm.recordProbe(s.source, start, err)
 			if err == nil && len(data) > 0 {
 				msm.MarkSourceSuccess(s.source)
 				return data, s.source, nil
@@ -1013,7 +1050,9 @@ func (msm *MultiSourceManager) pollFetchAStock(sources []struct {
 	// 当前数据源失败，尝试下一个
 	for _, s := range sources {
 		if s.source != nextSource && msm.IsSourceAvailable(s.source) {
+			start := time.Now()
 			data, err := s.fetch(codes)
+			msm.recordProbe(s.source, start, err)
 			if err == nil && len(data) > 0 {
 				msm.MarkSourceSuccess(s.source)
 				return data, s.source, nil
@@ -1025,6 +1064,36 @@ func (msm *MultiSourceManager) pollFetchAStock(sources []struct {
 	}
 
 	return nil, SourceEastmoney, fmt.Errorf("all data sources failed")
+}
+
+// GetStatusList 获取详细状态列表
+func (msm *MultiSourceManager) GetStatusList() []models.DataSourceStatus {
+	msm.mu.RLock()
+	defer msm.mu.RUnlock()
+
+	statuses := make([]models.DataSourceStatus, 0, len(msm.sources))
+	for source, info := range msm.sources {
+		status := models.DataSourceStatus{
+			Key:          fmt.Sprintf("%d", source),
+			Name:         info.Name,
+			Domain:       info.Domain,
+			Latency:      info.LastLatency,
+			LatencyLabel: formatLatencyLabel(info.LastLatency),
+			LastChecked:  formatStatusTime(info.LastChecked),
+			LastSuccess:  formatStatusTime(info.LastSuccess),
+			Status:       deriveSourceStatus(info),
+			FailCount:    info.FailCount,
+		}
+		statuses = append(statuses, status)
+	}
+
+	sort.Slice(statuses, func(i, j int) bool {
+		if statuses[i].Status == statuses[j].Status {
+			return statuses[i].Name < statuses[j].Name
+		}
+		return statuses[i].Status < statuses[j].Status
+	})
+	return statuses
 }
 
 // GetSourceStats 获取数据源统计信息
@@ -1045,4 +1114,40 @@ func (msm *MultiSourceManager) GetSourceStats() map[string]interface{} {
 		}
 	}
 	return stats
+}
+
+func formatLatencyLabel(d time.Duration) string {
+	if d <= 0 {
+		return "未知"
+	}
+	switch {
+	case d < 80*time.Millisecond:
+		return "极速"
+	case d < 200*time.Millisecond:
+		return "流畅"
+	case d < 500*time.Millisecond:
+		return "正常"
+	default:
+		return "缓慢"
+	}
+}
+
+func formatStatusTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
+func deriveSourceStatus(info *DataSourceInfo) string {
+	if info == nil {
+		return "unknown"
+	}
+	if info.Disabled {
+		return "disabled"
+	}
+	if info.FailCount > 0 || info.LastError != "" {
+		return "degraded"
+	}
+	return "healthy"
 }

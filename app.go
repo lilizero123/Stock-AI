@@ -1,14 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,18 +44,108 @@ type App struct {
 	// 自选股票价格缓存（用于提醒检查）
 	stockPriceCache     map[string]*models.StockPrice
 	stockPriceCacheLock sync.RWMutex
+	stockKLineCache     map[string][]models.KLineData
+	stockReportCache    map[string][]models.ResearchReport
+	stockNoticeCache    map[string][]models.StockNotice
+	stockFinancialCache map[string]*data.FinancialData
+	stockDataCacheLock  sync.RWMutex
+}
+
+const (
+	appVersion        = "1.0.0"
+	appBuildTime      = "2025-01-15"
+	updateManifestURL = "https://gitee.com/he-jun0000/Stock-AI/raw/main/releases/version.json"
+)
+
+const updateScriptTemplate = `@echo off
+setlocal
+set TARGET=%~1
+set SOURCE=%~2
+set BACKUP=%TARGET%.bak
+set LOGDIR=%USERPROFILE%\.stock-ai\logs
+set LOGFILE=%LOGDIR%\update.log
+
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+call :log "Updater started. target=%TARGET%"
+timeout /t 1 >nul
+
+if exist "%TARGET%" (
+:backup
+copy /Y "%TARGET%" "%BACKUP%" >nul
+if errorlevel 1 (
+  call :log "Waiting for application to exit..."
+  timeout /t 1 >nul
+  goto backup
+)
+call :log "Backup created at %BACKUP%"
+)
+
+:install
+copy /Y "%SOURCE%" "%TARGET%" >nul
+if errorlevel 1 (
+  call :log "Install failed, restoring backup and retrying..."
+  if exist "%BACKUP%" (
+    copy /Y "%BACKUP%" "%TARGET%" >nul
+  )
+  timeout /t 1 >nul
+  goto install
+)
+call :log "Install succeeded, launching new version"
+
+start "" "%TARGET%"
+del "%SOURCE%" >nul 2>&1
+del "%BACKUP%" >nul 2>&1
+call :log "Cleanup finished"
+del "%~f0"
+exit /b 0
+
+:log
+echo [%date% %time%] %~1>>"%LOGFILE%"
+goto :eof
+`
+
+func getUserDataDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return filepath.Join(homeDir, ".stock-ai")
+}
+
+func (a *App) logUpdateEvent(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("[Update] %s", msg)
+
+	logDir := filepath.Join(getUserDataDir(), "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return
+	}
+
+	logFile := filepath.Join(logDir, "update.log")
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, msg))
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		stockAPI:        data.NewStockAPI(),
-		fundAPI:         data.NewFundAPI(),
-		futuresAPI:      data.NewFuturesAPI(),
-		globalMarketAPI: data.NewGlobalMarketAPI(),
-		cryptoForexAPI:  data.NewCryptoForexAPI(),
-		sentimentAPI:    data.NewSentimentAPI(),
-		stockPriceCache: make(map[string]*models.StockPrice),
+		stockAPI:            data.NewStockAPI(),
+		fundAPI:             data.NewFundAPI(),
+		futuresAPI:          data.NewFuturesAPI(),
+		globalMarketAPI:     data.NewGlobalMarketAPI(),
+		cryptoForexAPI:      data.NewCryptoForexAPI(),
+		sentimentAPI:        data.NewSentimentAPI(),
+		stockPriceCache:     make(map[string]*models.StockPrice),
+		stockKLineCache:     make(map[string][]models.KLineData),
+		stockReportCache:    make(map[string][]models.ResearchReport),
+		stockNoticeCache:    make(map[string][]models.StockNotice),
+		stockFinancialCache: make(map[string]*data.FinancialData),
 	}
 }
 
@@ -78,6 +174,7 @@ func (a *App) startup(ctx context.Context) {
 		a.promptManager = promptMgr
 	}
 
+	go a.prefetchWatchlistData()
 	a.startPriceCacheUpdater()
 }
 
@@ -121,9 +218,13 @@ func (a *App) AddStock(code string) error {
 		// 记录存在
 		if existingStock.DeletedAt.Valid {
 			// 是软删除的记录，恢复它
-			return data.GetDB().Unscoped().Model(&existingStock).Updates(map[string]interface{}{
+			if err := data.GetDB().Unscoped().Model(&existingStock).Updates(map[string]interface{}{
 				"deleted_at": nil,
-			}).Error
+			}).Error; err != nil {
+				return err
+			}
+			go a.prefetchStockData(code, nil)
+			return nil
 		}
 		// 记录已存在且未删除
 		return fmt.Errorf("股票 %s 已存在", code)
@@ -151,7 +252,12 @@ func (a *App) AddStock(code string) error {
 		Market: market,
 	}
 
-	return data.GetDB().Create(&stock).Error
+	if err := data.GetDB().Create(&stock).Error; err != nil {
+		return err
+	}
+
+	go a.prefetchStockData(stock.Code, nil)
+	return nil
 }
 
 // normalizeStockCode 标准化股票代码，自动添加市场前缀
@@ -193,7 +299,12 @@ func normalizeStockCode(code string) string {
 
 // RemoveStock 删除自选股票（硬删除）
 func (a *App) RemoveStock(code string) error {
-	return data.GetDB().Unscoped().Where("code = ?", code).Delete(&models.Stock{}).Error
+	norm := normalizeStockCode(code)
+	err := data.GetDB().Unscoped().Where("code = ?", norm).Delete(&models.Stock{}).Error
+	if err == nil {
+		a.clearStockCaches(norm)
+	}
+	return err
 }
 
 // GetStockPrice 获取股票实时价格
@@ -621,6 +732,37 @@ func (a *App) SaveConfig(config models.Config) error {
 	return err
 }
 
+// SkipUpdateVersion 记录跳过的版本
+func (a *App) SkipUpdateVersion(version string) error {
+	if version == "" {
+		return fmt.Errorf("版本号不能为空")
+	}
+
+	config, err := a.GetConfig()
+	if err != nil {
+		return err
+	}
+	if config.SkipUpdateVersion == version {
+		return nil
+	}
+
+	config.SkipUpdateVersion = version
+	return a.SaveConfig(*config)
+}
+
+// clearSkipUpdateVersion 清除跳过的版本记录
+func (a *App) clearSkipUpdateVersion() error {
+	config, err := a.GetConfig()
+	if err != nil {
+		return err
+	}
+	if config.SkipUpdateVersion == "" {
+		return nil
+	}
+	config.SkipUpdateVersion = ""
+	return a.SaveConfig(*config)
+}
+
 // ========== 交易时间相关 ==========
 
 // TradingTimeInfo 交易时间信息
@@ -648,6 +790,18 @@ func (a *App) GetTradingTimeInfo() *TradingTimeInfo {
 	}
 }
 
+// GetDataPipelineStatus 获取数据通道总览
+func (a *App) GetDataPipelineStatus() (*models.DataPipelineStatus, error) {
+	msm := data.GetMultiSourceManager()
+	pipeline := &models.DataPipelineStatus{
+		MarketSources: msm.GetStatusList(),
+		Financial:     data.GetFinancialClient().GetDataSourceStatus(),
+		Proxy:         data.GetRequestManager().GetProxyStatus(),
+		GeneratedAt:   time.Now().Format(time.RFC3339),
+	}
+	return pipeline, nil
+}
+
 func (a *App) startPriceCacheUpdater() {
 	go func() {
 		for {
@@ -657,6 +811,88 @@ func (a *App) startPriceCacheUpdater() {
 			time.Sleep(a.getPriceCacheInterval())
 		}
 	}()
+}
+
+func (a *App) prefetchWatchlistData() {
+	stocks, err := a.GetStockList()
+	if err != nil || len(stocks) == 0 {
+		return
+	}
+
+	log.Printf("[Prefetch] 开始预加载 %d 条自选股数据", len(stocks))
+
+	var cfg *models.Config
+	if config, err := a.GetConfig(); err == nil {
+		cfg = config
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+
+	for _, stock := range stocks {
+		code := normalizeStockCode(stock.Code)
+		if code == "" {
+			continue
+		}
+
+		wg.Add(1)
+		go func(code string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			a.prefetchStockData(code, cfg)
+		}(code)
+	}
+
+	wg.Wait()
+	log.Printf("[Prefetch] 自选股数据预加载完成")
+}
+
+func (a *App) prefetchStockData(stockCode string, cfg *models.Config) {
+	code := normalizeStockCode(stockCode)
+	if code == "" {
+		return
+	}
+
+	if prices, err := a.stockAPI.GetStockPrice([]string{code}); err == nil {
+		if price, ok := prices[code]; ok && price != nil {
+			a.stockPriceCacheLock.Lock()
+			a.stockPriceCache[code] = price
+			a.stockPriceCacheLock.Unlock()
+		}
+	}
+
+	if klines, err := a.stockAPI.GetKLineData(code, "daily", 120); err == nil && len(klines) > 0 {
+		a.stockDataCacheLock.Lock()
+		a.stockKLineCache[code] = klines
+		a.stockDataCacheLock.Unlock()
+	}
+
+	if reports, err := a.stockAPI.GetResearchReports(code); err == nil {
+		a.stockDataCacheLock.Lock()
+		a.stockReportCache[code] = reports
+		a.stockDataCacheLock.Unlock()
+	}
+
+	if notices, err := a.stockAPI.GetStockNotices(code); err == nil {
+		a.stockDataCacheLock.Lock()
+		a.stockNoticeCache[code] = notices
+		a.stockDataCacheLock.Unlock()
+	}
+
+	activeCfg := cfg
+	if activeCfg == nil {
+		if config, err := a.GetConfig(); err == nil {
+			activeCfg = config
+		}
+	}
+	if activeCfg != nil {
+		if fin, err := a.fetchFinancialData(code, activeCfg); err == nil && fin != nil {
+			a.stockDataCacheLock.Lock()
+			a.stockFinancialCache[code] = fin
+			a.stockDataCacheLock.Unlock()
+		}
+	}
 }
 
 func (a *App) getPriceCacheInterval() time.Duration {
@@ -744,6 +980,161 @@ func isAllowedWebContentURL(target string) bool {
 	return true
 }
 
+func (a *App) getPriceSnapshot(code string) (*models.StockPrice, error) {
+	a.stockPriceCacheLock.RLock()
+	if price, ok := a.stockPriceCache[code]; ok && price != nil {
+		a.stockPriceCacheLock.RUnlock()
+		return price, nil
+	}
+	a.stockPriceCacheLock.RUnlock()
+
+	prices, err := a.stockAPI.GetStockPrice([]string{code})
+	if err != nil {
+		return nil, err
+	}
+
+	price, ok := prices[code]
+	if !ok || price == nil {
+		return nil, fmt.Errorf("未找到股票: %s", code)
+	}
+
+	a.stockPriceCacheLock.Lock()
+	a.stockPriceCache[code] = price
+	a.stockPriceCacheLock.Unlock()
+	return price, nil
+}
+
+func (a *App) getKLineDataCached(code string, count int) ([]models.KLineData, error) {
+	a.stockDataCacheLock.RLock()
+	if klines, ok := a.stockKLineCache[code]; ok && len(klines) > 0 {
+		copied := cloneKLines(klines, count)
+		a.stockDataCacheLock.RUnlock()
+		return copied, nil
+	}
+	a.stockDataCacheLock.RUnlock()
+
+	limit := count
+	if limit < 60 {
+		limit = 60
+	}
+	klines, err := a.stockAPI.GetKLineData(code, "daily", limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(klines) > 0 {
+		a.stockDataCacheLock.Lock()
+		a.stockKLineCache[code] = klines
+		a.stockDataCacheLock.Unlock()
+	}
+	return cloneKLines(klines, count), nil
+}
+
+func (a *App) getResearchReportsCached(code string) ([]models.ResearchReport, error) {
+	a.stockDataCacheLock.RLock()
+	if reports, ok := a.stockReportCache[code]; ok {
+		copied := make([]models.ResearchReport, len(reports))
+		copy(copied, reports)
+		a.stockDataCacheLock.RUnlock()
+		return copied, nil
+	}
+	a.stockDataCacheLock.RUnlock()
+
+	reports, err := a.stockAPI.GetResearchReports(code)
+	if err != nil {
+		return nil, err
+	}
+	a.stockDataCacheLock.Lock()
+	a.stockReportCache[code] = reports
+	a.stockDataCacheLock.Unlock()
+	return reports, nil
+}
+
+func (a *App) getStockNoticesCached(code string) ([]models.StockNotice, error) {
+	a.stockDataCacheLock.RLock()
+	if notices, ok := a.stockNoticeCache[code]; ok {
+		copied := make([]models.StockNotice, len(notices))
+		copy(copied, notices)
+		a.stockDataCacheLock.RUnlock()
+		return copied, nil
+	}
+	a.stockDataCacheLock.RUnlock()
+
+	notices, err := a.stockAPI.GetStockNotices(code)
+	if err != nil {
+		return nil, err
+	}
+	a.stockDataCacheLock.Lock()
+	a.stockNoticeCache[code] = notices
+	a.stockDataCacheLock.Unlock()
+	return notices, nil
+}
+
+func (a *App) getFinancialDataCached(code string, cfg *models.Config) (*data.FinancialData, error) {
+	a.stockDataCacheLock.RLock()
+	if fin, ok := a.stockFinancialCache[code]; ok && fin != nil {
+		a.stockDataCacheLock.RUnlock()
+		return fin, nil
+	}
+	a.stockDataCacheLock.RUnlock()
+
+	activeCfg := cfg
+	if activeCfg == nil {
+		if conf, err := a.GetConfig(); err == nil {
+			activeCfg = conf
+		} else {
+			return nil, err
+		}
+	}
+
+	fin, err := a.fetchFinancialData(code, activeCfg)
+	if err != nil {
+		return nil, err
+	}
+	if fin != nil {
+		a.stockDataCacheLock.Lock()
+		a.stockFinancialCache[code] = fin
+		a.stockDataCacheLock.Unlock()
+	}
+	return fin, nil
+}
+
+func cloneKLines(src []models.KLineData, count int) []models.KLineData {
+	if len(src) == 0 {
+		return nil
+	}
+	if count <= 0 || count > len(src) {
+		count = len(src)
+	}
+	result := make([]models.KLineData, count)
+	copy(result, src[:count])
+	return result
+}
+
+func (a *App) clearStockCaches(code string) {
+	a.stockPriceCacheLock.Lock()
+	delete(a.stockPriceCache, code)
+	a.stockPriceCacheLock.Unlock()
+
+	a.stockDataCacheLock.Lock()
+	delete(a.stockKLineCache, code)
+	delete(a.stockReportCache, code)
+	delete(a.stockNoticeCache, code)
+	delete(a.stockFinancialCache, code)
+	a.stockDataCacheLock.Unlock()
+}
+
+func (a *App) fetchFinancialData(code string, cfg *models.Config) (*data.FinancialData, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("配置不可用")
+	}
+	financialClient := data.GetFinancialClient()
+	if cfg.TushareToken != "" {
+		financialClient.SetTushareToken(cfg.TushareToken)
+	}
+	financialClient.SetPreferTushare(cfg.DataSourcePriority != "akshare")
+	return financialClient.GetFinancialData(code)
+}
+
 // ClearCache 清除缓存
 func (a *App) ClearCache() {
 	data.GetRequestManager().ClearAllCache()
@@ -754,19 +1145,24 @@ func (a *App) ClearCache() {
 // GetVersion 获取版本信息
 func (a *App) GetVersion() *models.VersionInfo {
 	return &models.VersionInfo{
-		Version:   "1.0.0",
-		BuildTime: "2025-01-15",
+		Version:   appVersion,
+		BuildTime: appBuildTime,
 	}
 }
 
 // CheckUpdate 检查更新
 func (a *App) CheckUpdate() *models.UpdateInfo {
-	currentVersion := "1.0.0"
+	currentVersion := appVersion
+
+	var skipVersion string
+	if config, err := a.GetConfig(); err == nil {
+		skipVersion = config.SkipUpdateVersion
+	}
 
 	// 从远程获取最新版本信息
 	// 这里使用一个简单的 JSON 文件作为版本检测源
 	// 你可以将这个文件托管在 GitHub Pages 或其他静态服务器上
-	updateUrl := "https://raw.githubusercontent.com/your-repo/stock-ai/main/version.json"
+	updateUrl := updateManifestURL
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(updateUrl)
@@ -803,6 +1199,20 @@ func (a *App) CheckUpdate() *models.UpdateInfo {
 
 	// 比较版本号
 	hasUpdate := compareVersions(versionData.Version, currentVersion) > 0
+	skipped := false
+
+	if skipVersion != "" {
+		cmp := compareVersions(versionData.Version, skipVersion)
+		if cmp == 0 {
+			skipped = true
+			hasUpdate = false
+		} else if cmp > 0 {
+			if err := a.clearSkipUpdateVersion(); err != nil {
+				log.Printf("清除跳过版本失败: %v", err)
+			}
+			skipVersion = ""
+		}
+	}
 
 	return &models.UpdateInfo{
 		HasUpdate:   hasUpdate,
@@ -812,7 +1222,178 @@ func (a *App) CheckUpdate() *models.UpdateInfo {
 		DownloadUrl: versionData.DownloadUrl,
 		ReleaseUrl:  versionData.ReleaseUrl,
 		ReleaseDate: versionData.ReleaseDate,
+		SkipVersion: skipVersion,
+		Skipped:     skipped,
 	}
+}
+
+// DownloadAndInstallUpdate 自动下载并安装更新
+func (a *App) DownloadAndInstallUpdate() (*models.UpdateInfo, error) {
+	info := a.CheckUpdate()
+	if info == nil {
+		return nil, fmt.Errorf("无法获取更新信息")
+	}
+
+	if !info.HasUpdate || info.DownloadUrl == "" {
+		return info, fmt.Errorf("当前已是最新版本")
+	}
+
+	a.logUpdateEvent("Preparing to update from %s to %s", info.CurrentVer, info.Version)
+	go a.handleAutoUpdate(info)
+	return info, nil
+}
+
+func (a *App) handleAutoUpdate(info *models.UpdateInfo) {
+	if err := a.downloadAndInstall(info); err != nil {
+		a.logUpdateEvent("Update failed: %v", err)
+		a.emitUpdateStatus("error", err.Error())
+	}
+}
+
+func (a *App) downloadAndInstall(info *models.UpdateInfo) error {
+	a.emitUpdateStatus("downloading", "正在下载更新包...")
+	a.logUpdateEvent("Start downloading update package: %s", info.Version)
+
+	if err := a.clearSkipUpdateVersion(); err != nil {
+		log.Printf("清除跳过版本失败: %v", err)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "stock-ai-update")
+	if err != nil {
+		return fmt.Errorf("创建临时目录失败: %w", err)
+	}
+
+	downloadURL, err := url.Parse(info.DownloadUrl)
+	if err != nil {
+		return fmt.Errorf("无效的下载地址: %w", err)
+	}
+
+	fileName := path.Base(downloadURL.Path)
+	if fileName == "" || fileName == "." || fileName == "/" {
+		fileName = fmt.Sprintf("stock-ai-%s.exe", info.Version)
+	}
+
+	tempFilePath := filepath.Join(tmpDir, fileName)
+	out, err := os.Create(tempFilePath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+
+	client := &http.Client{
+		Timeout: 0,
+	}
+	resp, err := client.Get(info.DownloadUrl)
+	if err != nil {
+		return fmt.Errorf("下载更新失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载更新失败，状态码: %d", resp.StatusCode)
+	}
+
+	const megaByte = 1024.0 * 1024.0
+	total := resp.ContentLength
+	var downloaded int64
+	startTime := time.Now()
+	buf := make([]byte, 64*1024)
+
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				return fmt.Errorf("写入临时文件失败: %w", writeErr)
+			}
+			downloaded += int64(n)
+
+			var percent float64
+			if total > 0 {
+				percent = (float64(downloaded) / float64(total)) * 100
+			}
+
+			var msg string
+			if total > 0 {
+				msg = fmt.Sprintf("已下载 %.2f / %.2f MB", float64(downloaded)/megaByte, float64(total)/megaByte)
+			} else {
+				msg = fmt.Sprintf("已下载 %.2f MB", float64(downloaded)/megaByte)
+			}
+			elapsed := time.Since(startTime).Seconds()
+			speedMBps := 0.0
+			etaSeconds := -1.0
+			if elapsed > 0 {
+				speedMBps = (float64(downloaded) / megaByte) / elapsed
+			}
+			if total > 0 && speedMBps > 0 {
+				remainingMB := (float64(total-downloaded) / megaByte)
+				etaSeconds = remainingMB / speedMBps
+			}
+
+			a.emitUpdateProgress(percent, msg, speedMBps, etaSeconds)
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return fmt.Errorf("下载更新失败: %w", readErr)
+		}
+	}
+
+	a.emitUpdateProgress(100, "下载完成", 0, 0)
+	a.emitUpdateStatus("installing", "下载完成，正在安装...")
+	a.logUpdateEvent("Update package downloaded successfully: %s", tempFilePath)
+
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("无法获取程序路径: %w", err)
+	}
+
+	scriptPath := filepath.Join(tmpDir, "apply_update.bat")
+	if err := os.WriteFile(scriptPath, []byte(updateScriptTemplate), 0644); err != nil {
+		return fmt.Errorf("创建更新脚本失败: %w", err)
+	}
+
+	cmd := exec.Command("cmd", "/C", "call", scriptPath, exePath, tempFilePath)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("执行更新脚本失败: %w", err)
+	}
+
+	a.emitUpdateStatus("restarting", "更新完成，应用即将重新启动...")
+	a.logUpdateEvent("Update script launched, restarting application")
+	go func() {
+		time.Sleep(2 * time.Second)
+		wailsRuntime.Quit(a.ctx)
+	}()
+
+	return nil
+}
+
+func (a *App) emitUpdateProgress(percent float64, message string, speed float64, etaSeconds float64) {
+	payload := map[string]interface{}{
+		"percent": percent,
+		"message": message,
+	}
+
+	if speed > 0 {
+		payload["speed"] = speed
+	}
+	if etaSeconds >= 0 {
+		payload["etaSeconds"] = etaSeconds
+	}
+
+	wailsRuntime.EventsEmit(a.ctx, "update:progress", payload)
+}
+
+func (a *App) emitUpdateStatus(status string, message string) {
+	a.logUpdateEvent("%s - %s", strings.ToUpper(status), message)
+	wailsRuntime.EventsEmit(a.ctx, "update:status", map[string]interface{}{
+		"status":  status,
+		"message": message,
+	})
 }
 
 // compareVersions 比较版本号，返回 1 表示 v1 > v2，-1 表示 v1 < v2，0 表示相等
@@ -1354,27 +1935,27 @@ func (a *App) AISummarizeContentStream(title string, contentType string, pageURL
 				}
 			}
 
-			// 方案2: 使用Edge浏览器获取内容
+			// 方案2: 使用本地浏览器获取内容
 			if webContent == "" && pageURL != "" {
 				if !isAllowedWebContentURL(pageURL) {
 					log.Printf("[AI摘要] 拒绝不安全的URL: %s", pageURL)
 				} else {
-					log.Printf("[AI摘要] 尝试Edge浏览器获取内容: %s", pageURL)
-					wailsRuntime.EventsEmit(a.ctx, "ai-summary-stream", "尝试通过Edge浏览器获取内容...\n")
-					edgeFetcher := data.NewEdgeFetcher()
-					if edgeFetcher.IsAvailable() {
-						log.Printf("[AI摘要] Edge可用，开始抓取...")
-						content, err := edgeFetcher.FetchContent(pageURL)
-						log.Printf("[AI摘要] Edge抓取完成: len=%d, err=%v", len(content), err)
+					log.Printf("[AI摘要] 尝试浏览器获取内容: %s", pageURL)
+					wailsRuntime.EventsEmit(a.ctx, "ai-summary-stream", "尝试通过本地浏览器获取内容...\n")
+					browserFetcher := data.NewBrowserFetcher(config.BrowserPath)
+					if browserFetcher.IsAvailable() {
+						log.Printf("[AI摘要] %s 可用，开始抓取...", browserFetcher.Name())
+						content, err := browserFetcher.FetchContent(pageURL)
+						log.Printf("[AI摘要] 浏览器抓取完成: len=%d, err=%v", len(content), err)
 						if err == nil && content != "" && len(content) > 100 {
 							webContent = content
-							fetchMethod = "Edge浏览器"
+							fetchMethod = browserFetcher.Name() + "抓取"
 							wailsRuntime.EventsEmit(a.ctx, "ai-summary-stream", "成功获取页面内容！\n\n")
 						} else {
-							log.Printf("[AI摘要] Edge获取失败: %v", err)
+							log.Printf("[AI摘要] 浏览器获取失败: %v", err)
 						}
 					} else {
-						log.Printf("[AI摘要] Edge浏览器不可用")
+						log.Printf("[AI摘要] 未检测到可用浏览器")
 					}
 				}
 			}
@@ -1497,19 +2078,14 @@ func (a *App) AISummarizeContentStream(title string, contentType string, pageURL
 func (a *App) buildStockContext(code string) (string, error) {
 	code = normalizeStockCode(code)
 
-	prices, err := a.stockAPI.GetStockPrice([]string{code})
+	stock, err := a.getPriceSnapshot(code)
 	if err != nil {
 		return "", err
 	}
 
-	stock, ok := prices[code]
-	if !ok {
-		return "", fmt.Errorf("未找到股票")
-	}
-
-	klines, _ := a.stockAPI.GetKLineData(code, "daily", 10)
-	reports, _ := a.stockAPI.GetResearchReports(code)
-	notices, _ := a.stockAPI.GetStockNotices(code)
+	klines, _ := a.getKLineDataCached(code, 10)
+	reports, _ := a.getResearchReportsCached(code)
+	notices, _ := a.getStockNoticesCached(code)
 
 	return data.BuildStockAnalysisPrompt(stock, klines, reports, notices), nil
 }
@@ -1544,37 +2120,25 @@ func (a *App) AIAnalyzeByTypeStream(code string, analysisType string, masterStyl
 		// 获取股票数据
 		wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", "正在获取股票数据...\n\n")
 
-		prices, err := a.stockAPI.GetStockPrice([]string{code})
+		stock, err := a.getPriceSnapshot(code)
 		if err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "ai-analysis-error", "获取股票价格失败")
 			return
 		}
 
-		stock, ok := prices[code]
-		if !ok {
-			wailsRuntime.EventsEmit(a.ctx, "ai-analysis-error", "未找到股票数据")
-			return
-		}
-
 		// 获取K线数据
-		klines, _ := a.stockAPI.GetKLineData(code, "daily", 60)
+		klines, _ := a.getKLineDataCached(code, 60)
 		// 获取研报
-		reports, _ := a.stockAPI.GetResearchReports(code)
+		reports, _ := a.getResearchReportsCached(code)
 		// 获取公告
-		notices, _ := a.stockAPI.GetStockNotices(code)
+		notices, _ := a.getStockNoticesCached(code)
 		// 获取持仓信息
 		position, _ := a.GetPositionByStock(code)
 		// 获取财务数据（用于基本面分析）
 		var financialData *data.FinancialData
 		if analysisType == "fundamental" || analysisType == "master" {
 			wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", "正在获取财务数据...\n\n")
-			financialClient := data.GetFinancialClient()
-			// 根据配置设置数据源优先级
-			if config.TushareToken != "" {
-				financialClient.SetTushareToken(config.TushareToken)
-			}
-			financialClient.SetPreferTushare(config.DataSourcePriority != "akshare")
-			financialData, _ = financialClient.GetFinancialData(code)
+			financialData, _ = a.getFinancialDataCached(code, &config)
 		}
 
 		// 构建分析提示词
@@ -2769,6 +3333,11 @@ func (a *App) CheckStockAlerts() ([]models.AlertNotification, error) {
 		return nil, nil
 	}
 
+	var pushConfig *models.Config
+	if cfg, err := a.GetConfig(); err == nil && cfg.AlertPushEnabled {
+		pushConfig = cfg
+	}
+
 	// 检查每个提醒
 	var notifications []models.AlertNotification
 	now := time.Now()
@@ -2830,6 +3399,11 @@ func (a *App) CheckStockAlerts() ([]models.AlertNotification, error) {
 			// 发送事件到前端
 			wailsRuntime.EventsEmit(a.ctx, "stock-alert-triggered", notification)
 
+			// 推送到外部通道
+			if pushConfig != nil {
+				go a.dispatchAlertPush(pushConfig, notification)
+			}
+
 			// 发送到所有启用的通知插件
 			if a.pluginManager.HasEnabledNotificationPlugins() {
 				alertTypeText := "股价提醒"
@@ -2858,6 +3432,235 @@ func (a *App) CheckStockAlerts() ([]models.AlertNotification, error) {
 	}
 
 	return notifications, nil
+}
+
+// TestAlertPush 测试外部推送通道
+func (a *App) TestAlertPush(channel string) error {
+	cfg, err := a.GetConfig()
+	if err != nil {
+		return err
+	}
+
+	sample := models.AlertNotification{
+		ID:            0,
+		StockCode:     "sh000001",
+		StockName:     "上证指数",
+		AlertType:     "price",
+		TargetValue:   3200,
+		CurrentPrice:  3210,
+		CurrentChange: 0.56,
+		Message:       "测试提醒：当前价格 3210.00，预设目标 3200.00",
+		Time:          time.Now().Format("15:04:05"),
+	}
+
+	switch strings.ToLower(channel) {
+	case "wecom":
+		if strings.TrimSpace(cfg.WecomWebhook) == "" {
+			return fmt.Errorf("请先配置企业微信 Webhook")
+		}
+		return sendWecomWebhook(cfg.WecomWebhook, "Stock AI 提醒测试", formatAlertMarkdown(sample))
+	case "dingtalk":
+		if strings.TrimSpace(cfg.DingtalkWebhook) == "" {
+			return fmt.Errorf("请先配置钉钉 Webhook")
+		}
+		return sendDingTalkWebhook(cfg.DingtalkWebhook, "Stock AI 提醒测试", formatAlertMarkdown(sample))
+	case "email":
+		if !cfg.EmailPushEnabled || strings.TrimSpace(cfg.EmailTo) == "" {
+			return fmt.Errorf("请先启用并配置邮件推送")
+		}
+		return sendEmailNotification(cfg, "Stock AI 提醒测试", formatAlertText(sample))
+	default:
+		return fmt.Errorf("未知的通道: %s", channel)
+	}
+}
+
+func (a *App) dispatchAlertPush(cfg *models.Config, notification models.AlertNotification) {
+	if cfg == nil {
+		return
+	}
+	title := fmt.Sprintf("%s提醒", notification.StockName)
+	markdown := formatAlertMarkdown(notification)
+	text := formatAlertText(notification)
+
+	if hook := strings.TrimSpace(cfg.WecomWebhook); hook != "" {
+		if err := sendWecomWebhook(hook, title, markdown); err != nil {
+			log.Printf("[AlertPush] WeCom 推送失败: %v", err)
+		}
+	}
+	if hook := strings.TrimSpace(cfg.DingtalkWebhook); hook != "" {
+		if err := sendDingTalkWebhook(hook, title, markdown); err != nil {
+			log.Printf("[AlertPush] 钉钉推送失败: %v", err)
+		}
+	}
+	if cfg.EmailPushEnabled && strings.TrimSpace(cfg.EmailTo) != "" {
+		if err := sendEmailNotification(cfg, "Stock AI "+title, text); err != nil {
+			log.Printf("[AlertPush] 邮件推送失败: %v", err)
+		}
+	}
+}
+
+func formatAlertMarkdown(n models.AlertNotification) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("**%s (%s)**\n", n.StockName, n.StockCode))
+	sb.WriteString(fmt.Sprintf("> %s\n", n.Message))
+	sb.WriteString(fmt.Sprintf("> 现价：%.2f | 涨跌：%.2f%%\n", n.CurrentPrice, n.CurrentChange))
+	sb.WriteString(fmt.Sprintf("> 目标：%.2f | 时间：%s\n", n.TargetValue, n.Time))
+	return sb.String()
+}
+
+func formatAlertText(n models.AlertNotification) string {
+	return fmt.Sprintf(
+		"%s (%s)\n%s\n现价: %.2f\n涨跌幅: %.2f%%\n目标值: %.2f\n时间: %s\n",
+		n.StockName,
+		n.StockCode,
+		n.Message,
+		n.CurrentPrice,
+		n.CurrentChange,
+		n.TargetValue,
+		n.Time,
+	)
+}
+
+func sendWecomWebhook(webhook string, title string, content string) error {
+	payload := map[string]interface{}{
+		"msgtype": "markdown",
+		"markdown": map[string]string{
+			"content": fmt.Sprintf("**%s**\n%s", title, content),
+		},
+	}
+	return postJSON(webhook, payload)
+}
+
+func sendDingTalkWebhook(webhook string, title string, content string) error {
+	payload := map[string]interface{}{
+		"msgtype": "markdown",
+		"markdown": map[string]string{
+			"title": title,
+			"text":  fmt.Sprintf("### %s\n%s", title, content),
+		},
+	}
+	return postJSON(webhook, payload)
+}
+
+func sendEmailNotification(cfg *models.Config, subject string, body string) error {
+	recipients := splitRecipients(cfg.EmailTo)
+	if len(recipients) == 0 {
+		return fmt.Errorf("未配置收件人")
+	}
+
+	addr := fmt.Sprintf("%s:%d", cfg.EmailSMTP, cfg.EmailPort)
+	host := cfg.EmailSMTP
+	auth := smtp.PlainAuth("", cfg.EmailUser, cfg.EmailPassword, host)
+
+	var msg bytes.Buffer
+	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(recipients, ",")))
+	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	msg.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
+	msg.WriteString(body)
+
+	if cfg.EmailPort == 465 {
+		tlsConfig := &tls.Config{ServerName: host}
+		conn, err := tls.Dial("tcp", addr, tlsConfig)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		client, err := smtp.NewClient(conn, host)
+		if err != nil {
+			return err
+		}
+		defer client.Quit()
+
+		if cfg.EmailUser != "" {
+			if err := client.Auth(auth); err != nil {
+				return err
+			}
+		}
+		if err := client.Mail(cfg.EmailUser); err != nil {
+			return err
+		}
+		for _, rcpt := range recipients {
+			if err := client.Rcpt(strings.TrimSpace(rcpt)); err != nil {
+				return err
+			}
+		}
+		writer, err := client.Data()
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Write(msg.Bytes()); err != nil {
+			return err
+		}
+		return writer.Close()
+	}
+
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		tlsConfig := &tls.Config{ServerName: host}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return err
+		}
+	}
+	if cfg.EmailUser != "" {
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(cfg.EmailUser); err != nil {
+		return err
+	}
+	for _, rcpt := range recipients {
+		if err := client.Rcpt(strings.TrimSpace(rcpt)); err != nil {
+			return err
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(msg.Bytes()); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
+}
+
+func splitRecipients(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\n'
+	})
+	var result []string
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func postJSON(target string, payload interface{}) error {
+	dataBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(target, "application/json", bytes.NewReader(dataBytes))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("推送失败: %s", strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 // ========== 插件管理 ==========
@@ -3250,43 +4053,6 @@ func (a *App) ExecuteIndicatorPrompt(promptName string, stockCode string) (*prom
 	return result, nil
 }
 
-// ExecuteStrategyPrompt 执行策略提示词分析
-func (a *App) ExecuteStrategyPrompt(promptName string, stockCode string) (*prompt.StrategyResult, error) {
-	if a.promptManager == nil {
-		return nil, fmt.Errorf("提示词管理器未初始化")
-	}
-
-	// 获取提示词
-	promptInfo, err := a.promptManager.Get(prompt.PromptTypeStrategy, promptName)
-	if err != nil {
-		return nil, fmt.Errorf("获取提示词失败: %w", err)
-	}
-
-	// 获取股票数据
-	stockData, err := a.getStockDataForPrompt(stockCode)
-	if err != nil {
-		return nil, err
-	}
-
-	// 构建提示词
-	builtPrompt := prompt.BuildPrompt(promptInfo.Content, stockData)
-
-	// 调用AI
-	aiResponse, err := a.callAIForPrompt(builtPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("AI分析失败: %w", err)
-	}
-
-	// 解析结果
-	result := &prompt.StrategyResult{
-		Signal:  prompt.ParseSignal(aiResponse),
-		Message: prompt.TruncateText(aiResponse, 500),
-		Data:    map[string]interface{}{"raw": aiResponse},
-	}
-
-	return result, nil
-}
-
 // ExecuteScreenerPrompt 执行选股提示词
 func (a *App) ExecuteScreenerPrompt(promptName string) (*prompt.ScreenerResult, error) {
 	if a.promptManager == nil {
@@ -3460,19 +4226,13 @@ func (a *App) SetActivePersona(personaName string) error {
 func (a *App) getStockDataForPrompt(stockCode string) (*prompt.StockData, error) {
 	stockCode = normalizeStockCode(stockCode)
 
-	// 获取股票价格
-	prices, err := a.stockAPI.GetStockPrice([]string{stockCode})
+	stock, err := a.getPriceSnapshot(stockCode)
 	if err != nil {
 		return nil, fmt.Errorf("获取股票价格失败: %w", err)
 	}
 
-	stock, ok := prices[stockCode]
-	if !ok {
-		return nil, fmt.Errorf("未找到股票: %s", stockCode)
-	}
-
 	// 获取K线数据
-	klines, _ := a.stockAPI.GetKLineData(stockCode, "daily", 30)
+	klines, _ := a.getKLineDataCached(stockCode, 30)
 
 	// 构建股票数据
 	stockData := &prompt.StockData{

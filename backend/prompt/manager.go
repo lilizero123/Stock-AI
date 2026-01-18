@@ -13,7 +13,6 @@ type PromptType string
 
 const (
 	PromptTypeIndicator PromptType = "indicator" // 指标分析
-	PromptTypeStrategy  PromptType = "strategy"  // 交易策略
 	PromptTypeScreener  PromptType = "screener"  // 选股筛选
 	PromptTypeReview    PromptType = "review"    // 复盘分析
 	PromptTypePersona   PromptType = "persona"   // AI人设
@@ -52,7 +51,6 @@ func NewManager(baseDir string) (*Manager, error) {
 func (m *Manager) ensureDirectories() error {
 	types := []PromptType{
 		PromptTypeIndicator,
-		PromptTypeStrategy,
 		PromptTypeScreener,
 		PromptTypeReview,
 		PromptTypePersona,
@@ -125,7 +123,6 @@ func (m *Manager) ListAll() (map[PromptType][]PromptInfo, error) {
 
 	types := []PromptType{
 		PromptTypeIndicator,
-		PromptTypeStrategy,
 		PromptTypeScreener,
 		PromptTypeReview,
 		PromptTypePersona,
@@ -327,7 +324,7 @@ func (m *Manager) readPromptFile(filePath string, promptType PromptType) (*Promp
 
 func isValidPromptType(promptType PromptType) bool {
 	switch promptType {
-	case PromptTypeIndicator, PromptTypeStrategy, PromptTypeScreener, PromptTypeReview, PromptTypePersona:
+	case PromptTypeIndicator, PromptTypeScreener, PromptTypeReview, PromptTypePersona:
 		return true
 	default:
 		return false
@@ -346,7 +343,6 @@ func GetPromptTypes() []struct {
 		Description string     `json:"description"`
 	}{
 		{PromptTypeIndicator, "指标分析", "分析股票技术指标，如MACD、KDJ等，给出买卖信号"},
-		{PromptTypeStrategy, "交易策略", "分析股票并给出交易策略建议（买入/卖出/持有）"},
 		{PromptTypeScreener, "选股筛选", "根据条件从股票池中筛选符合要求的股票"},
 		{PromptTypeReview, "复盘分析", "分析持仓表现，生成每日/每周复盘报告"},
 		{PromptTypePersona, "AI人设", "自定义AI助手的回答风格和专业领域"},

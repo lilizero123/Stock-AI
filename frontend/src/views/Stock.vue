@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import {
   NCard,
   NDataTable,
@@ -26,9 +26,12 @@ import {
   NListItem,
   NThing,
   NPopconfirm,
+  NCheckbox,
+  NCheckboxGroup,
   useMessage
 } from 'naive-ui'
 import { h } from 'vue'
+import * as echarts from 'echarts'
 import {
   GetStockList,
   AddStock,
@@ -52,7 +55,8 @@ import {
   DeleteStockAlert,
   ToggleStockAlert,
   ResetStockAlert,
-  CheckStockAlerts
+  CheckStockAlerts,
+  GetKLineData
 } from '../../wailsjs/go/main/App'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 
@@ -127,6 +131,19 @@ const alertForm = ref({
 let alertCheckTimer = null
 const eventOffFns = []
 
+const klineData = ref([])
+const klineLoading = ref(false)
+const klineRef = ref(null)
+let klineChart = null
+const indicatorOptions = [
+  { label: '均线', value: 'ma' },
+  { label: '成交量', value: 'volume' },
+  { label: 'RSI', value: 'rsi' }
+]
+const activeIndicators = ref(['ma', 'volume'])
+const widgetOrder = ref(['chart', 'report', 'notice'])
+const draggingWidget = ref('')
+
 // 分析类型选项
 const analysisTypeOptions = [
   { label: '基本面分析', value: 'fundamental', desc: '财务数据、估值指标、盈利能力' },
@@ -160,6 +177,22 @@ const sentimentMasters = [
 
 // 所有大师选项（用于标题显示）
 const allMasterOptions = [...fundamentalMasters, ...technicalMasters, ...sentimentMasters]
+
+const handleWidgetDragStart = (widget) => {
+  draggingWidget.value = widget
+}
+
+const handleWidgetDrop = (target) => {
+  if (!draggingWidget.value || draggingWidget.value === target) return
+  const order = widgetOrder.value.slice()
+  const from = order.indexOf(draggingWidget.value)
+  const to = order.indexOf(target)
+  if (from === -1 || to === -1) return
+  order.splice(from, 1)
+  order.splice(to, 0, draggingWidget.value)
+  widgetOrder.value = order
+  draggingWidget.value = ''
+}
 
 const columns = [
   { title: '代码', key: 'code', width: 100 },
@@ -953,12 +986,200 @@ const showDetail = async (stock) => {
     ])
     reports.value = reportData || []
     notices.value = noticeData || []
+    await loadKLine(stock.code)
   } catch (e) {
     console.error('加载详情失败:', e)
   } finally {
     detailLoading.value = false
   }
 }
+
+const loadKLine = async (code) => {
+  if (!code) return
+  klineLoading.value = true
+  try {
+    const data = await GetKLineData(code, 'daily', 240)
+    klineData.value = data || []
+    await nextTick()
+    renderKLineChart()
+  } catch (e) {
+    console.error('获取K线失败:', e)
+  } finally {
+    klineLoading.value = false
+  }
+}
+
+const resizeKLineChart = () => {
+  if (klineChart) {
+    klineChart.resize()
+  }
+}
+
+const disposeKLineChart = () => {
+  if (klineChart) {
+    window.removeEventListener('resize', resizeKLineChart)
+    klineChart.dispose()
+    klineChart = null
+  }
+}
+
+const renderKLineChart = () => {
+  if (!klineRef.value || klineData.value.length === 0) {
+    disposeKLineChart()
+    return
+  }
+  if (!klineChart) {
+    klineChart = echarts.init(klineRef.value)
+    window.addEventListener('resize', resizeKLineChart)
+  }
+  const hasSubPanel = activeIndicators.value.includes('volume') || activeIndicators.value.includes('rsi')
+  const dates = klineData.value.map((item) => item.date)
+  const ohlc = klineData.value.map((item) => [item.open, item.close, item.low, item.high])
+  const volumes = klineData.value.map((item) => item.volume || 0)
+  const closes = klineData.value.map((item) => item.close)
+  const ma5 = calculateMA(closes, 5)
+  const ma20 = calculateMA(closes, 20)
+  const rsi = calculateRSI(closes, 14)
+
+  const series = [
+    {
+      name: 'K线',
+      type: 'candlestick',
+      data: ohlc
+    }
+  ]
+  if (activeIndicators.value.includes('ma')) {
+    series.push(
+      {
+        name: 'MA5',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        data: ma5
+      },
+      {
+        name: 'MA20',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        data: ma20
+      }
+    )
+  }
+  if (activeIndicators.value.includes('volume')) {
+    series.push({
+      name: '成交量',
+      type: 'bar',
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      data: volumes,
+      itemStyle: {
+        color: '#5C7BD9'
+      }
+    })
+  }
+  if (activeIndicators.value.includes('rsi')) {
+    series.push({
+      name: 'RSI14',
+      type: 'line',
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      data: rsi,
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { color: '#f6ad55' }
+    })
+  }
+
+  const option = {
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0 },
+    grid: [
+      { left: 40, right: 20, top: 40, height: hasSubPanel ? '58%' : '72%' },
+      { left: 40, right: 20, top: hasSubPanel ? '72%' : '90%', height: hasSubPanel ? '18%' : 0 }
+    ],
+    xAxis: [
+      { type: 'category', data: dates, boundaryGap: false },
+      {
+        type: 'category',
+        data: dates,
+        gridIndex: 1,
+        boundaryGap: false,
+        show: hasSubPanel
+      }
+    ],
+    yAxis: [
+      { scale: true, splitNumber: 4 },
+      {
+        scale: true,
+        gridIndex: 1,
+        show: hasSubPanel
+      }
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1] },
+      { type: 'slider', xAxisIndex: [0, 1], bottom: 0 }
+    ],
+    series
+  }
+  klineChart.setOption(option)
+}
+
+const calculateMA = (values, period) => {
+  const result = []
+  for (let i = 0; i < values.length; i++) {
+    if (i < period) {
+      result.push(null)
+      continue
+    }
+    let sum = 0
+    for (let j = 0; j < period; j++) {
+      sum += values[i - j]
+    }
+    result.push((sum / period).toFixed(2))
+  }
+  return result
+}
+
+const calculateRSI = (values, period = 14) => {
+  const result = new Array(values.length).fill(null)
+  let avgGain = 0
+  let avgLoss = 0
+  for (let i = 1; i < values.length; i++) {
+    const change = values[i] - values[i - 1]
+    const gain = change > 0 ? change : 0
+    const loss = change < 0 ? -change : 0
+    if (i <= period) {
+      avgGain += gain
+      avgLoss += loss
+      if (i === period) {
+        avgGain /= period
+        avgLoss /= period
+        result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss)
+      }
+    } else {
+      avgGain = (avgGain * (period - 1) + gain) / period
+      avgLoss = (avgLoss * (period - 1) + loss) / period
+      result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss)
+    }
+  }
+  return result
+}
+
+watch(activeIndicators, () => {
+  if (klineData.value.length > 0) {
+    nextTick(() => renderKLineChart())
+  }
+})
+
+watch(showDetailModal, (visible) => {
+  if (!visible) {
+    disposeKLineChart()
+    klineData.value = []
+  } else {
+    nextTick(() => renderKLineChart())
+  }
+})
 
 // 在详情弹窗中打开AI分析
 const openAIFromDetail = () => {
@@ -1022,6 +1243,7 @@ onUnmounted(() => {
     }
   })
   eventOffFns.length = 0
+  disposeKLineChart()
 })
 
 // 格式化内容
@@ -1111,30 +1333,59 @@ const formatContent = (content) => {
           </span>
         </div>
 
-        <n-tabs type="line" animated style="margin-top: 16px;">
-          <n-tab-pane name="report" tab="研报">
-            <n-data-table
-              :columns="reportColumns"
-              :data="reports"
-              :loading="detailLoading"
-              :bordered="false"
-              size="small"
-              :max-height="300"
-            />
-            <n-empty v-if="reports.length === 0 && !detailLoading" description="暂无研报数据" />
-          </n-tab-pane>
-          <n-tab-pane name="notice" tab="公告">
-            <n-data-table
-              :columns="noticeColumns"
-              :data="notices"
-              :loading="detailLoading"
-              :bordered="false"
-              size="small"
-              :max-height="300"
-            />
-            <n-empty v-if="notices.length === 0 && !detailLoading" description="暂无公告数据" />
-          </n-tab-pane>
-        </n-tabs>
+        <div class="detail-widgets">
+          <div
+            v-for="widget in widgetOrder"
+            :key="widget"
+            class="detail-widget"
+            draggable="true"
+            @dragstart="handleWidgetDragStart(widget)"
+            @dragover.prevent
+            @drop="handleWidgetDrop(widget)"
+          >
+            <template v-if="widget === 'chart'">
+              <div class="widget-header">
+                <span>K线与指标</span>
+                <n-checkbox-group v-model:value="activeIndicators" size="small">
+                  <n-checkbox v-for="item in indicatorOptions" :key="item.value" :value="item.value">
+                    {{ item.label }}
+                  </n-checkbox>
+                </n-checkbox-group>
+              </div>
+              <n-spin :show="klineLoading">
+                <div ref="klineRef" class="kline-chart"></div>
+              </n-spin>
+            </template>
+            <template v-else-if="widget === 'report'">
+              <div class="widget-header">
+                <span>最新研报</span>
+              </div>
+              <n-data-table
+                :columns="reportColumns"
+                :data="reports"
+                :loading="detailLoading"
+                :bordered="false"
+                size="small"
+                :max-height="280"
+              />
+              <n-empty v-if="reports.length === 0 && !detailLoading" description="暂无研报数据" />
+            </template>
+            <template v-else>
+              <div class="widget-header">
+                <span>公告速览</span>
+              </div>
+              <n-data-table
+                :columns="noticeColumns"
+                :data="notices"
+                :loading="detailLoading"
+                :bordered="false"
+                size="small"
+                :max-height="280"
+              />
+              <n-empty v-if="notices.length === 0 && !detailLoading" description="暂无公告数据" />
+            </template>
+          </div>
+        </div>
       </div>
     </n-modal>
 
@@ -1824,6 +2075,36 @@ const formatContent = (content) => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.detail-widgets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.detail-widget {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.detail-widget[draggable='true'] {
+  cursor: move;
+}
+
+.widget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.kline-chart {
+  width: 100%;
+  height: 320px;
 }
 
 .current-price-info {

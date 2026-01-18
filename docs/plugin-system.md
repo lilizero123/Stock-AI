@@ -153,67 +153,6 @@ function calculate(klines, params) {
 }
 ```
 
-### 5. 策略插件
-
-允许用户编写选股策略和买卖信号。
-
-**配置格式：**
-```json
-{
-  "name": "均线金叉策略",
-  "type": "strategy",
-  "enabled": true,
-  "config": {
-    "script": "strategy.js",
-    "params": {
-      "shortPeriod": 5,
-      "longPeriod": 20
-    },
-    "alertOnSignal": true
-  }
-}
-```
-
-**策略脚本示例 (JavaScript)：**
-```javascript
-// strategy.js
-function analyze(klines, params) {
-  const { shortPeriod, longPeriod } = params;
-
-  // 计算均线
-  function ma(data, period) {
-    const result = [];
-    for (let i = 0; i < data.length; i++) {
-      if (i < period - 1) {
-        result.push(null);
-      } else {
-        const sum = data.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
-        result.push(sum / period);
-      }
-    }
-    return result;
-  }
-
-  const closes = klines.map(k => k.close);
-  const maShort = ma(closes, shortPeriod);
-  const maLong = ma(closes, longPeriod);
-
-  const lastIdx = closes.length - 1;
-  const prevIdx = lastIdx - 1;
-
-  // 判断金叉
-  const goldenCross = maShort[prevIdx] <= maLong[prevIdx] && maShort[lastIdx] > maLong[lastIdx];
-  // 判断死叉
-  const deathCross = maShort[prevIdx] >= maLong[prevIdx] && maShort[lastIdx] < maLong[lastIdx];
-
-  return {
-    signal: goldenCross ? 'buy' : (deathCross ? 'sell' : 'hold'),
-    message: goldenCross ? '均线金叉，买入信号' : (deathCross ? '均线死叉，卖出信号' : '持有观望'),
-    data: { maShort: maShort[lastIdx], maLong: maLong[lastIdx] }
-  };
-}
-```
-
 ## 插件管理
 
 ### 插件目录结构
@@ -234,10 +173,6 @@ stock-ai/
 │   │   ├── config.json
 │   │   └── scripts/
 │   │       └── macd.js
-│   └── strategies/          # 策略插件
-│       ├── config.json
-│       └── scripts/
-│           └── golden_cross.js
 ```
 
 ### 插件配置文件 (plugins/config.json)
@@ -268,12 +203,6 @@ stock-ai/
       "id": "indicator-custom-macd",
       "type": "indicator",
       "path": "indicators/config.json",
-      "enabled": true
-    },
-    {
-      "id": "strategy-golden-cross",
-      "type": "strategy",
-      "path": "strategies/config.json",
       "enabled": true
     }
   ]
@@ -336,7 +265,7 @@ stock-ai/
    - 在设置中选择AI模型
    - 支持多模型配置
 
-### 第五阶段：指标和策略插件
+### 第五阶段：指标插件
 
 1. **JavaScript引擎集成**
    - 使用goja或otto引擎
@@ -345,10 +274,6 @@ stock-ai/
 2. **指标计算**
    - 自定义指标脚本
    - 指标结果展示
-
-3. **策略信号**
-   - 策略脚本执行
-   - 信号通知
 
 ## 安全考虑
 
@@ -386,9 +311,6 @@ func (a *App) TestDatasource(pluginId string, code string) (*StockPrice, error)
 
 // 指标插件
 func (a *App) CalculateIndicator(pluginId string, code string) (map[string]interface{}, error)
-
-// 策略插件
-func (a *App) RunStrategy(pluginId string, code string) (*StrategyResult, error)
 ```
 
 ### 前端API
@@ -409,9 +331,6 @@ export function TestDatasource(pluginId: string, code: string): Promise<StockPri
 
 // 指标插件
 export function CalculateIndicator(pluginId: string, code: string): Promise<any>
-
-// 策略插件
-export function RunStrategy(pluginId: string, code: string): Promise<StrategyResult>
 ```
 
 ## 预置插件模板

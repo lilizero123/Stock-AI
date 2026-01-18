@@ -68,9 +68,17 @@ func InitDB() error {
 	var config models.Config
 	if db.First(&config).Error == gorm.ErrRecordNotFound {
 		config = models.Config{
-			RefreshInterval: 5,
-			AiEnabled:       false,
-			AiModel:         "deepseek",
+			RefreshInterval:   5,
+			ProxyPoolTTL:      60,
+			ProxyPoolSize:     5,
+			ProxyProvider:     "kuaidaili",
+			ProxyPoolProtocol: "http",
+			Theme:             "dark",
+			CustomPrimary:     "#18a058",
+			AlertPushEnabled:  false,
+			EmailPort:         465,
+			AiEnabled:         false,
+			AiModel:           "deepseek",
 		}
 		db.Create(&config)
 	}

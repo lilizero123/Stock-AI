@@ -406,6 +406,27 @@ export namespace models {
 	    id: number;
 	    refreshInterval: number;
 	    proxyUrl: string;
+	    proxyPoolEnabled: boolean;
+	    proxyProvider: string;
+	    proxyApiUrl: string;
+	    proxyApiKey: string;
+	    proxyApiSecret: string;
+	    proxyRegion: string;
+	    proxyPoolList: string;
+	    proxyPoolProtocol: string;
+	    proxyPoolTTL: number;
+	    proxyPoolSize: number;
+	    theme: string;
+	    customPrimary: string;
+	    alertPushEnabled: boolean;
+	    wecomWebhook: string;
+	    dingtalkWebhook: string;
+	    emailPushEnabled: boolean;
+	    emailSmtp: string;
+	    emailPort: number;
+	    emailUser: string;
+	    emailPassword: string;
+	    emailTo: string;
 	    aiEnabled: boolean;
 	    aiModel: string;
 	    aiApiKey: string;
@@ -421,6 +442,7 @@ export namespace models {
 	    akshareEnabled: boolean;
 	    dataSourcePriority: string;
 	    activePersona: string;
+	    skipUpdateVersion: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -431,6 +453,27 @@ export namespace models {
 	        this.id = source["id"];
 	        this.refreshInterval = source["refreshInterval"];
 	        this.proxyUrl = source["proxyUrl"];
+	        this.proxyPoolEnabled = source["proxyPoolEnabled"];
+	        this.proxyProvider = source["proxyProvider"];
+	        this.proxyApiUrl = source["proxyApiUrl"];
+	        this.proxyApiKey = source["proxyApiKey"];
+	        this.proxyApiSecret = source["proxyApiSecret"];
+	        this.proxyRegion = source["proxyRegion"];
+	        this.proxyPoolList = source["proxyPoolList"];
+	        this.proxyPoolProtocol = source["proxyPoolProtocol"];
+	        this.proxyPoolTTL = source["proxyPoolTTL"];
+	        this.proxyPoolSize = source["proxyPoolSize"];
+	        this.theme = source["theme"];
+	        this.customPrimary = source["customPrimary"];
+	        this.alertPushEnabled = source["alertPushEnabled"];
+	        this.wecomWebhook = source["wecomWebhook"];
+	        this.dingtalkWebhook = source["dingtalkWebhook"];
+	        this.emailPushEnabled = source["emailPushEnabled"];
+	        this.emailSmtp = source["emailSmtp"];
+	        this.emailPort = source["emailPort"];
+	        this.emailUser = source["emailUser"];
+	        this.emailPassword = source["emailPassword"];
+	        this.emailTo = source["emailTo"];
 	        this.aiEnabled = source["aiEnabled"];
 	        this.aiModel = source["aiModel"];
 	        this.aiApiKey = source["aiApiKey"];
@@ -446,8 +489,100 @@ export namespace models {
 	        this.akshareEnabled = source["akshareEnabled"];
 	        this.dataSourcePriority = source["dataSourcePriority"];
 	        this.activePersona = source["activePersona"];
+	        this.skipUpdateVersion = source["skipUpdateVersion"];
 	    }
 	}
+	export class ProxyStatus {
+	    enabled: boolean;
+	    poolEnabled: boolean;
+	    provider: string;
+	    activeProxies: number;
+	    expiresAt: string;
+	    expiresInSeconds: number;
+	    lastFetch: string;
+	    lastError: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProxyStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.poolEnabled = source["poolEnabled"];
+	        this.provider = source["provider"];
+	        this.activeProxies = source["activeProxies"];
+	        this.expiresAt = source["expiresAt"];
+	        this.expiresInSeconds = source["expiresInSeconds"];
+	        this.lastFetch = source["lastFetch"];
+	        this.lastError = source["lastError"];
+	    }
+	}
+	export class DataSourceStatus {
+	    key: string;
+	    name: string;
+	    domain: string;
+	    latency: number;
+	    latencyLabel: string;
+	    lastChecked: string;
+	    lastSuccess: string;
+	    status: string;
+	    failCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DataSourceStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.name = source["name"];
+	        this.domain = source["domain"];
+	        this.latency = source["latency"];
+	        this.latencyLabel = source["latencyLabel"];
+	        this.lastChecked = source["lastChecked"];
+	        this.lastSuccess = source["lastSuccess"];
+	        this.status = source["status"];
+	        this.failCount = source["failCount"];
+	    }
+	}
+	export class DataPipelineStatus {
+	    marketSources: DataSourceStatus[];
+	    financial: Record<string, any>;
+	    proxy: ProxyStatus;
+	    generatedAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DataPipelineStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.marketSources = this.convertValues(source["marketSources"], DataSourceStatus);
+	        this.financial = source["financial"];
+	        this.proxy = this.convertValues(source["proxy"], ProxyStatus);
+	        this.generatedAt = source["generatedAt"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class ForexRate {
 	    pair: string;
 	    name: string;
@@ -926,6 +1061,7 @@ export namespace models {
 		    return a;
 		}
 	}
+	
 	export class ResearchReport {
 	    title: string;
 	    stockName: string;
@@ -1127,6 +1263,8 @@ export namespace models {
 	    downloadUrl: string;
 	    releaseUrl: string;
 	    releaseDate: string;
+	    skipVersion: string;
+	    skipped: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new UpdateInfo(source);
@@ -1141,6 +1279,8 @@ export namespace models {
 	        this.downloadUrl = source["downloadUrl"];
 	        this.releaseUrl = source["releaseUrl"];
 	        this.releaseDate = source["releaseDate"];
+	        this.skipVersion = source["skipVersion"];
+	        this.skipped = source["skipped"];
 	    }
 	}
 	export class VersionInfo {
@@ -1546,23 +1686,6 @@ export namespace prompt {
 		}
 	}
 	
-	
-	export class StrategyResult {
-	    signal: string;
-	    message: string;
-	    data: Record<string, any>;
-	
-	    static createFrom(source: any = {}) {
-	        return new StrategyResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.signal = source["signal"];
-	        this.message = source["message"];
-	        this.data = source["data"];
-	    }
-	}
 
 }
 

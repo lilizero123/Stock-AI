@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   NLayout,
@@ -21,7 +21,6 @@ import {
   InformationCircleOutline,
   SparklesOutline,
   TimeOutline,
-  PulseOutline,
   CashOutline,
   ExtensionPuzzleOutline,
   DocumentTextOutline,
@@ -31,12 +30,31 @@ import { h } from 'vue'
 import AISidebar from './components/AISidebar.vue'
 import UpdateChecker from './components/UpdateChecker.vue'
 import DisclaimerModal from './components/DisclaimerModal.vue'
+import { GetConfig } from '../wailsjs/go/main/App'
 
 const router = useRouter()
 const route = useRoute()
 const collapsed = ref(false)
-const isDark = ref(true)
+const currentTheme = ref('dark')
+const customPrimary = ref('#18a058')
 const aiSidebarCollapsed = ref(false)
+const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null
+const systemDark = ref(prefersDark ? prefersDark.matches : true)
+
+const isDarkTheme = computed(() => {
+  if (currentTheme.value === 'system') {
+    return systemDark.value
+  }
+  return currentTheme.value === 'dark'
+})
+
+const themeOverrides = computed(() => ({
+  common: {
+    primaryColor: customPrimary.value,
+    primaryColorHover: customPrimary.value,
+    primaryColorSuppl: customPrimary.value
+  }
+}))
 
 // 需要显示 AI 侧边栏的路由
 const showAISidebarRoutes = ['/', '/fund', '/market']
@@ -115,10 +133,48 @@ const handleMenuUpdate = (key) => {
     router.push(key)
   }
 }
+
+const applyTheme = (cfg) => {
+  if (!cfg) return
+  if (cfg.theme) {
+    currentTheme.value = cfg.theme
+  }
+  if (cfg.customPrimary) {
+    customPrimary.value = cfg.customPrimary
+  }
+}
+
+const loadThemeFromConfig = async () => {
+  try {
+    const cfg = await GetConfig()
+    applyTheme(cfg)
+  } catch (e) {
+    console.error('加载主题配置失败:', e)
+  }
+}
+
+const handleThemeEvent = (event) => {
+  applyTheme(event?.detail || {})
+}
+
+const handleSystemThemeChange = (event) => {
+  systemDark.value = event.matches
+}
+
+onMounted(() => {
+  loadThemeFromConfig()
+  prefersDark?.addEventListener('change', handleSystemThemeChange)
+  window.addEventListener('stock-ai:theme-updated', handleThemeEvent)
+})
+
+onUnmounted(() => {
+  prefersDark?.removeEventListener('change', handleSystemThemeChange)
+  window.removeEventListener('stock-ai:theme-updated', handleThemeEvent)
+})
 </script>
 
 <template>
-  <n-config-provider :theme="isDark ? darkTheme : null" :locale="zhCN">
+  <n-config-provider :theme="isDarkTheme ? darkTheme : null" :theme-overrides="themeOverrides" :locale="zhCN">
     <n-message-provider>
       <n-dialog-provider>
         <n-notification-provider>

@@ -146,6 +146,10 @@ export function DeleteStockAlert(arg1) {
   return window['go']['main']['App']['DeleteStockAlert'](arg1);
 }
 
+export function DownloadAndInstallUpdate() {
+  return window['go']['main']['App']['DownloadAndInstallUpdate']();
+}
+
 export function ExecuteIndicatorPrompt(arg1, arg2) {
   return window['go']['main']['App']['ExecuteIndicatorPrompt'](arg1, arg2);
 }
@@ -156,10 +160,6 @@ export function ExecuteReviewPrompt(arg1) {
 
 export function ExecuteScreenerPrompt(arg1) {
   return window['go']['main']['App']['ExecuteScreenerPrompt'](arg1);
-}
-
-export function ExecuteStrategyPrompt(arg1, arg2) {
-  return window['go']['main']['App']['ExecuteStrategyPrompt'](arg1, arg2);
 }
 
 export function ExportAIAnalysisHistory(arg1) {
@@ -228,6 +228,10 @@ export function GetConfig() {
 
 export function GetDataCleanupInfo() {
   return window['go']['main']['App']['GetDataCleanupInfo']();
+}
+
+export function GetDataPipelineStatus() {
+  return window['go']['main']['App']['GetDataPipelineStatus']();
 }
 
 export function GetDatasourceTemplates() {
@@ -534,8 +538,16 @@ export function SetActivePersona(arg1) {
   return window['go']['main']['App']['SetActivePersona'](arg1);
 }
 
+export function SkipUpdateVersion(arg1) {
+  return window['go']['main']['App']['SkipUpdateVersion'](arg1);
+}
+
 export function TestAIPlugin(arg1) {
   return window['go']['main']['App']['TestAIPlugin'](arg1);
+}
+
+export function TestAlertPush(arg1) {
+  return window['go']['main']['App']['TestAlertPush'](arg1);
 }
 
 export function TestDatasource(arg1, arg2) {

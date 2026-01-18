@@ -78,13 +78,13 @@ export function DeletePrompt(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteStockAlert(arg1:number):Promise<void>;
 
+export function DownloadAndInstallUpdate():Promise<models.UpdateInfo>;
+
 export function ExecuteIndicatorPrompt(arg1:string,arg2:string):Promise<prompt.IndicatorResult>;
 
 export function ExecuteReviewPrompt(arg1:string):Promise<prompt.ReviewResult>;
 
 export function ExecuteScreenerPrompt(arg1:string):Promise<prompt.ScreenerResult>;
-
-export function ExecuteStrategyPrompt(arg1:string,arg2:string):Promise<prompt.StrategyResult>;
 
 export function ExportAIAnalysisHistory(arg1:string):Promise<string>;
 
@@ -119,6 +119,8 @@ export function GetCachedMarketData():Promise<main.CachedMarketData>;
 export function GetConfig():Promise<models.Config>;
 
 export function GetDataCleanupInfo():Promise<main.DataCleanupInfo>;
+
+export function GetDataPipelineStatus():Promise<models.DataPipelineStatus>;
 
 export function GetDatasourceTemplates():Promise<Array<any>>;
 
@@ -272,7 +274,11 @@ export function SendNotificationToAll(arg1:plugin.NotificationData):Promise<Arra
 
 export function SetActivePersona(arg1:string):Promise<void>;
 
+export function SkipUpdateVersion(arg1:string):Promise<void>;
+
 export function TestAIPlugin(arg1:string):Promise<string>;
+
+export function TestAlertPush(arg1:string):Promise<void>;
 
 export function TestDatasource(arg1:string,arg2:string):Promise<plugin.DatasourceResult>;
 

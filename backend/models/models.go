@@ -151,14 +151,35 @@ type HotTopic struct {
 
 // Config 系统配置
 type Config struct {
-	ID              uint   `gorm:"primarykey" json:"id"`
-	RefreshInterval int    `json:"refreshInterval"`
-	ProxyUrl        string `json:"proxyUrl"`
-	AiEnabled       bool   `json:"aiEnabled"`
-	AiModel         string `json:"aiModel"`
-	AiApiKey        string `json:"aiApiKey"`
-	AiApiUrl        string `json:"aiApiUrl"`
-	BrowserPath     string `json:"browserPath"`
+	ID                uint   `gorm:"primarykey" json:"id"`
+	RefreshInterval   int    `json:"refreshInterval"`
+	ProxyUrl          string `json:"proxyUrl"`
+	ProxyPoolEnabled  bool   `json:"proxyPoolEnabled"`
+	ProxyProvider     string `json:"proxyProvider"`
+	ProxyApiUrl       string `json:"proxyApiUrl"`
+	ProxyApiKey       string `json:"proxyApiKey"`
+	ProxyApiSecret    string `json:"proxyApiSecret"`
+	ProxyRegion       string `json:"proxyRegion"`
+	ProxyPoolList     string `json:"proxyPoolList"`
+	ProxyPoolProtocol string `json:"proxyPoolProtocol"`
+	ProxyPoolTTL      int    `json:"proxyPoolTTL"`
+	ProxyPoolSize     int    `json:"proxyPoolSize"`
+	Theme             string `json:"theme"`
+	CustomPrimary     string `json:"customPrimary"`
+	AlertPushEnabled  bool   `json:"alertPushEnabled"`
+	WecomWebhook      string `json:"wecomWebhook"`
+	DingtalkWebhook   string `json:"dingtalkWebhook"`
+	EmailPushEnabled  bool   `json:"emailPushEnabled"`
+	EmailSMTP         string `json:"emailSmtp"`
+	EmailPort         int    `json:"emailPort"`
+	EmailUser         string `json:"emailUser"`
+	EmailPassword     string `json:"emailPassword"`
+	EmailTo           string `json:"emailTo"`
+	AiEnabled         bool   `json:"aiEnabled"`
+	AiModel           string `json:"aiModel"`
+	AiApiKey          string `json:"aiApiKey"`
+	AiApiUrl          string `json:"aiApiUrl"`
+	BrowserPath       string `json:"browserPath"`
 	// 付费API配置
 	PaidApiEnabled  bool   `json:"paidApiEnabled"`
 	PaidApiProvider string `json:"paidApiProvider"` // eastmoney, ths, wind, tushare, akshare
@@ -166,14 +187,16 @@ type Config struct {
 	PaidApiSecret   string `json:"paidApiSecret"`
 	PaidApiUrl      string `json:"paidApiUrl"`
 	// Tushare配置
-	TushareToken    string `json:"tushareToken"`    // Tushare Pro Token
-	TushareEnabled  bool   `json:"tushareEnabled"`  // 是否启用Tushare
+	TushareToken   string `json:"tushareToken"`   // Tushare Pro Token
+	TushareEnabled bool   `json:"tushareEnabled"` // 是否启用Tushare
 	// AKShare配置
-	AkshareEnabled  bool   `json:"akshareEnabled"`  // 是否启用AKShare
+	AkshareEnabled bool `json:"akshareEnabled"` // 是否启用AKShare
 	// 数据源优先级
 	DataSourcePriority string `json:"dataSourcePriority"` // tushare, akshare（优先使用哪个）
 	// AI人设
 	ActivePersona string `json:"activePersona"` // 当前激活的AI人设名称
+	// 更新策略
+	SkipUpdateVersion string `json:"skipUpdateVersion"`
 }
 
 // VersionInfo 版本信息
@@ -191,6 +214,41 @@ type UpdateInfo struct {
 	DownloadUrl string `json:"downloadUrl"`
 	ReleaseUrl  string `json:"releaseUrl"`
 	ReleaseDate string `json:"releaseDate"`
+	SkipVersion string `json:"skipVersion"`
+	Skipped     bool   `json:"skipped"`
+}
+
+// DataSourceStatus 数据源状态
+type DataSourceStatus struct {
+	Key          string        `json:"key"`
+	Name         string        `json:"name"`
+	Domain       string        `json:"domain"`
+	Latency      time.Duration `json:"latency"`
+	LatencyLabel string        `json:"latencyLabel"`
+	LastChecked  string        `json:"lastChecked"`
+	LastSuccess  string        `json:"lastSuccess"`
+	Status       string        `json:"status"`
+	FailCount    int           `json:"failCount"`
+}
+
+// ProxyStatus 代理池状态
+type ProxyStatus struct {
+	Enabled          bool   `json:"enabled"`
+	PoolEnabled      bool   `json:"poolEnabled"`
+	Provider         string `json:"provider"`
+	ActiveProxies    int    `json:"activeProxies"`
+	ExpiresAt        string `json:"expiresAt"`
+	ExpiresInSeconds int    `json:"expiresInSeconds"`
+	LastFetch        string `json:"lastFetch"`
+	LastError        string `json:"lastError"`
+}
+
+// DataPipelineStatus 数据通道总览
+type DataPipelineStatus struct {
+	MarketSources []DataSourceStatus     `json:"marketSources"`
+	Financial     map[string]interface{} `json:"financial"`
+	Proxy         ProxyStatus            `json:"proxy"`
+	GeneratedAt   string                 `json:"generatedAt"`
 }
 
 // AIMessage AI聊天消息
@@ -229,18 +287,18 @@ type AIChatResponse struct {
 // Position 持仓信息
 type Position struct {
 	ID            uint           `gorm:"primarykey" json:"id"`
-	StockCode     string         `gorm:"index;size:20" json:"stockCode"`     // 股票代码
-	StockName     string         `gorm:"size:50" json:"stockName"`           // 股票名称
-	BuyPrice      float64        `json:"buyPrice"`                           // 买入价格
-	BuyDate       string         `gorm:"size:20" json:"buyDate"`             // 买入日期
-	Quantity      int            `json:"quantity"`                           // 持仓数量（股）
-	CostPrice     float64        `json:"costPrice"`                          // 成本价（含手续费）
-	TargetPrice   float64        `json:"targetPrice"`                        // 目标价
-	StopLossPrice float64        `json:"stopLossPrice"`                      // 止损价
-	Notes         string         `gorm:"type:text" json:"notes"`             // 备注（买入理由等）
+	StockCode     string         `gorm:"index;size:20" json:"stockCode"`          // 股票代码
+	StockName     string         `gorm:"size:50" json:"stockName"`                // 股票名称
+	BuyPrice      float64        `json:"buyPrice"`                                // 买入价格
+	BuyDate       string         `gorm:"size:20" json:"buyDate"`                  // 买入日期
+	Quantity      int            `json:"quantity"`                                // 持仓数量（股）
+	CostPrice     float64        `json:"costPrice"`                               // 成本价（含手续费）
+	TargetPrice   float64        `json:"targetPrice"`                             // 目标价
+	StopLossPrice float64        `json:"stopLossPrice"`                           // 止损价
+	Notes         string         `gorm:"type:text" json:"notes"`                  // 备注（买入理由等）
 	Status        string         `gorm:"size:20;default:'holding'" json:"status"` // 状态：holding持有, sold已卖出
-	SellPrice     float64        `json:"sellPrice"`                          // 卖出价格
-	SellDate      string         `gorm:"size:20" json:"sellDate"`            // 卖出日期
+	SellPrice     float64        `json:"sellPrice"`                               // 卖出价格
+	SellDate      string         `gorm:"size:20" json:"sellDate"`                 // 卖出日期
 	CreatedAt     time.Time      `json:"createdAt"`
 	UpdatedAt     time.Time      `json:"updatedAt"`
 	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
@@ -251,10 +309,10 @@ type Position struct {
 // Futures 期货基础信息
 type Futures struct {
 	ID        uint           `gorm:"primarykey" json:"id"`
-	Code      string         `gorm:"uniqueIndex;size:20" json:"code"`   // 合约代码，如 AU2406
-	Name      string         `gorm:"size:100" json:"name"`              // 合约名称
-	Exchange  string         `gorm:"size:20" json:"exchange"`           // 交易所：SHFE上期所, DCE大商所, CZCE郑商所, CFFEX中金所, INE能源中心
-	Product   string         `gorm:"size:20" json:"product"`            // 品种代码，如 AU
+	Code      string         `gorm:"uniqueIndex;size:20" json:"code"` // 合约代码，如 AU2406
+	Name      string         `gorm:"size:100" json:"name"`            // 合约名称
+	Exchange  string         `gorm:"size:20" json:"exchange"`         // 交易所：SHFE上期所, DCE大商所, CZCE郑商所, CFFEX中金所, INE能源中心
+	Product   string         `gorm:"size:20" json:"product"`          // 品种代码，如 AU
 	CreatedAt time.Time      `json:"createdAt"`
 	UpdatedAt time.Time      `json:"updatedAt"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
@@ -394,20 +452,20 @@ type ForexRate struct {
 
 // StockAlert 股票价格提醒
 type StockAlert struct {
-	ID                  uint           `gorm:"primarykey" json:"id"`
-	StockCode           string         `gorm:"index;size:20" json:"stockCode"`           // 股票代码
-	StockName           string         `gorm:"size:50" json:"stockName"`                 // 股票名称
-	AlertType           string         `gorm:"size:20" json:"alertType"`                 // 提醒类型：price（股价提醒）、change（涨跌提醒）
-	TargetValue         float64        `json:"targetValue"`                              // 目标值（股价或涨跌幅百分比）
-	Condition           string         `gorm:"size:10" json:"condition"`                 // 条件：above（高于）、below（低于）
-	Enabled             bool           `gorm:"default:true" json:"enabled"`              // 是否启用
-	Triggered           bool           `gorm:"default:false" json:"triggered"`           // 是否已触发
-	TriggeredAt         *time.Time     `json:"triggeredAt"`                              // 触发时间
-	TriggeredPrice      float64        `json:"triggeredPrice"`                           // 触发时的价格
-	TriggeredChange     float64        `json:"triggeredChange"`                          // 触发时的涨跌幅
-	CreatedAt           time.Time      `json:"createdAt"`
-	UpdatedAt           time.Time      `json:"updatedAt"`
-	DeletedAt           gorm.DeletedAt `gorm:"index" json:"-"`
+	ID              uint           `gorm:"primarykey" json:"id"`
+	StockCode       string         `gorm:"index;size:20" json:"stockCode"` // 股票代码
+	StockName       string         `gorm:"size:50" json:"stockName"`       // 股票名称
+	AlertType       string         `gorm:"size:20" json:"alertType"`       // 提醒类型：price（股价提醒）、change（涨跌提醒）
+	TargetValue     float64        `json:"targetValue"`                    // 目标值（股价或涨跌幅百分比）
+	Condition       string         `gorm:"size:10" json:"condition"`       // 条件：above（高于）、below（低于）
+	Enabled         bool           `gorm:"default:true" json:"enabled"`    // 是否启用
+	Triggered       bool           `gorm:"default:false" json:"triggered"` // 是否已触发
+	TriggeredAt     *time.Time     `json:"triggeredAt"`                    // 触发时间
+	TriggeredPrice  float64        `json:"triggeredPrice"`                 // 触发时的价格
+	TriggeredChange float64        `json:"triggeredChange"`                // 触发时的涨跌幅
+	CreatedAt       time.Time      `json:"createdAt"`
+	UpdatedAt       time.Time      `json:"updatedAt"`
+	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // AlertNotification 提醒通知（用于前端显示）

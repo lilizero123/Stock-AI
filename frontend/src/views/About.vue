@@ -20,6 +20,7 @@ const buildTime = ref('')
 const hasUpdate = ref(false)
 const latestVersion = ref('')
 const checking = ref(false)
+const MANUAL_UPDATE_EVENT = 'stock-ai:show-update-dialog'
 
 const changelog = [
   { version: 'v1.0.0', date: '2025-01-15', content: '首个正式版本发布', type: 'success' },
@@ -55,7 +56,10 @@ const checkUpdate = async () => {
     if (result && result.hasUpdate) {
       hasUpdate.value = true
       latestVersion.value = result.version
-      message.info('发现新版本: ' + result.version)
+      message.info('发现新版本: ' + result.version + '，请在弹窗中选择是否更新')
+      window.dispatchEvent(new CustomEvent(MANUAL_UPDATE_EVENT, { detail: result }))
+    } else if (result?.skipped && result?.skipVersion) {
+      message.info('您已选择跳过版本 ' + result.skipVersion + '，等待新版本发布')
     } else {
       message.success('当前已是最新版本')
     }
@@ -68,6 +72,10 @@ const checkUpdate = async () => {
 
 const openGitHub = () => {
   OpenURL('https://github.com')
+}
+
+const openQQ = () => {
+  OpenURL('tencent://message/?uin=3946808002&Site=qq&Menu=yes')
 }
 
 onMounted(() => {
@@ -117,7 +125,9 @@ onMounted(() => {
         </n-space>
 
         <div v-if="hasUpdate" class="update-info">
-          <n-tag type="warning" size="large">发现新版本: {{ latestVersion }}，请前往项目页面下载</n-tag>
+          <n-tag type="warning" size="large">
+            发现新版本: {{ latestVersion }}，请在弹窗中选择更新策略
+          </n-tag>
         </div>
 
         <n-divider title-placement="left">功能特性</n-divider>
@@ -162,6 +172,19 @@ onMounted(() => {
         </div>
 
         <n-divider />
+
+        <n-divider title-placement="left">联系开发者</n-divider>
+        <div class="contact-info">
+          <div class="contact-text">
+            QQ 咨询： 
+            <a href="javascript:;" @click.prevent="openQQ">3946808002</a>
+            （点击自动拉起 QQ）
+          </div>
+          <n-button type="success" tertiary @click="openQQ">打开 QQ 联系</n-button>
+        </div>
+        <p class="contact-warning">
+          <span>仅供个人学习自用，任何售卖、商业分发或收费服务前请务必取得作者书面许可，违者将依法追责。</span>
+        </p>
 
         <div class="copyright">
           <p>Copyright 2025 Stock AI. 基于 MIT 协议开源。</p>
@@ -236,6 +259,27 @@ onMounted(() => {
   font-size: 13px;
   color: #999;
   line-height: 1.5;
+}
+
+.contact-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.contact-text a {
+  color: #18a058;
+  font-weight: 600;
+}
+
+.contact-warning {
+  color: #ff4d4f;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
 }
 
 .copyright {

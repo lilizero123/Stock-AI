@@ -7,17 +7,17 @@ import (
 
 // StockData 股票数据（用于提示词变量替换）
 type StockData struct {
-	Code          string    `json:"code"`
-	Name          string    `json:"name"`
-	Price         float64   `json:"price"`
-	Change        float64   `json:"change"`
-	ChangePercent float64   `json:"changePercent"`
-	Volume        float64   `json:"volume"`
-	Amount        float64   `json:"amount"`
-	High          float64   `json:"high"`
-	Low           float64   `json:"low"`
-	Open          float64   `json:"open"`
-	PreClose      float64   `json:"preClose"`
+	Code          string      `json:"code"`
+	Name          string      `json:"name"`
+	Price         float64     `json:"price"`
+	Change        float64     `json:"change"`
+	ChangePercent float64     `json:"changePercent"`
+	Volume        float64     `json:"volume"`
+	Amount        float64     `json:"amount"`
+	High          float64     `json:"high"`
+	Low           float64     `json:"low"`
+	Open          float64     `json:"open"`
+	PreClose      float64     `json:"preClose"`
 	KLines        []KLineData `json:"klines,omitempty"`
 }
 
@@ -48,19 +48,19 @@ type ScreenerStock struct {
 
 // ReviewResult 复盘结果
 type ReviewResult struct {
-	Summary      string         `json:"summary"`      // 总体摘要
-	Performance  string         `json:"performance"`  // 表现评价
-	Suggestions  []string       `json:"suggestions"`  // 操作建议
-	StockReviews []StockReview  `json:"stockReviews"` // 各股票复盘
-	Raw          string         `json:"raw"`          // AI原始输出
+	Summary      string        `json:"summary"`      // 总体摘要
+	Performance  string        `json:"performance"`  // 表现评价
+	Suggestions  []string      `json:"suggestions"`  // 操作建议
+	StockReviews []StockReview `json:"stockReviews"` // 各股票复盘
+	Raw          string        `json:"raw"`          // AI原始输出
 }
 
 // StockReview 单只股票的复盘
 type StockReview struct {
-	Code       string `json:"code"`
-	Name       string `json:"name"`
-	Action     string `json:"action"`     // 建议操作：hold/sell/add
-	Reason     string `json:"reason"`     // 原因
+	Code        string  `json:"code"`
+	Name        string  `json:"name"`
+	Action      string  `json:"action"`      // 建议操作：hold/sell/add
+	Reason      string  `json:"reason"`      // 原因
 	TargetPrice float64 `json:"targetPrice"` // 目标价
 }
 
@@ -70,13 +70,6 @@ type IndicatorResult struct {
 	Value  float64 `json:"value"`  // 数值结果
 	Text   string  `json:"text"`   // 文本分析
 	Raw    string  `json:"raw"`    // AI原始输出
-}
-
-// StrategyResult 策略分析结果
-type StrategyResult struct {
-	Signal  string                 `json:"signal"`  // buy/sell/hold/strong_buy/strong_sell
-	Message string                 `json:"message"` // 分析消息
-	Data    map[string]interface{} `json:"data"`    // 额外数据
 }
 
 // BuildPrompt 构建提示词（替换变量）

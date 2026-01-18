@@ -12,7 +12,6 @@ Stock AI 提供开放的插件系统，允许第三方开发者编写自定义�
 | datasource | 数据源插件 - 接入自定义行情API | ✅ 可用 |
 | ai | AI模型插件 - 接入自定义AI模型 | ✅ 可用 |
 | indicator | 指标插件 - AI提示词分析技术指标 | ✅ 可用 |
-| strategy | 策略插件 - AI提示词分析交易策略 | ✅ 可用 |
 
 ## 快速开始
 
@@ -471,9 +470,9 @@ AI模型插件用于接入自定义的AI大模型，支持OpenAI兼容接口。
 
 ### v1.1.0 (2025-01)
 - 新增指标插件（基于AI提示词）
-- 新增策略插件（基于AI提示词）
 - 数据源插件正式可用
 - AI模型插件正式可用
+- 策略插件功能已移除（迁移至独立策略/回测产品）
 
 ### v1.0.0 (2024-01)
 - 初始版本
@@ -562,94 +561,6 @@ AI模型插件用于接入自定义的AI大模型，支持OpenAI兼容接口。
   "config": {
     "prompt": "请分析以下股票的KDJ指标：\n\n股票：{name}（{code}）\n当前价格：{price}\n今日最高：{high}\n今日最低：{low}\n\n近期K线数据：\n{klines}\n\n请分析：\n1. 当前K、D、J值\n2. 是否处于超买（>80）或超卖（<20）区域\n3. 买卖建议\n\n请在回答开头明确标注：【买入】【卖出】或【观望】",
     "outputFormat": "signal"
-  }
-}
-```
-
-## 策略插件开发
-
-策略插件使用AI提示词来分析股票，给出交易策略建议。
-
-### 配置结构
-
-```json
-{
-  "id": "my-strategy",
-  "name": "我的策略插件",
-  "type": "strategy",
-  "version": "1.0.0",
-  "author": "Your Name",
-  "description": "基于AI的交易策略分析",
-  "enabled": true,
-  "config": {
-    "prompt": "请分析以下股票并给出交易建议...",
-    "aiPluginId": "",
-    "alertOnSignal": true,
-    "params": {}
-  }
-}
-```
-
-### 配置字段说明
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| prompt | string | ✅ | AI提示词模板，支持变量替换 |
-| aiPluginId | string | ❌ | 指定使用的AI插件ID，为空则使用默认 |
-| alertOnSignal | bool | ❌ | 产生买卖信号时是否发送提醒 |
-| params | object | ❌ | 自定义参数 |
-
-### 可用变量
-
-与指标插件相同，支持 {code}、{name}、{price}、{klines} 等变量。
-
-### 示例：趋势跟踪策略
-
-```json
-{
-  "id": "trend-following",
-  "name": "趋势跟踪策略",
-  "type": "strategy",
-  "version": "1.0.0",
-  "description": "基于趋势判断的交易策略",
-  "enabled": true,
-  "config": {
-    "prompt": "你是一个专业的股票分析师，请基于趋势跟踪策略分析以下股票：\n\n股票：{name}（{code}）\n当前价格：{price}\n涨跌幅：{changePercent}\n成交量：{volume}\n\n近期K线数据：\n{klines}\n\n请分析：\n1. 短期趋势（5日）\n2. 中期趋势（20日）\n3. 趋势强度\n4. 入场/出场建议\n\n请在回答开头明确给出操作建议：【买入】【卖出】【持有】",
-    "alertOnSignal": true
-  }
-}
-```
-
-### 示例：价值投资策略
-
-```json
-{
-  "id": "value-investing",
-  "name": "价值投资策略",
-  "type": "strategy",
-  "version": "1.0.0",
-  "description": "基于价值分析的长期投资策略",
-  "enabled": true,
-  "config": {
-    "prompt": "你是一个价值投资分析师，请分析以下股票的投资价值：\n\n股票：{name}（{code}）\n当前价格：{price}\n涨跌幅：{changePercent}\n\n近期K线数据：\n{klines}\n\n请从价值投资角度分析：\n1. 当前价格是否处于合理估值区间\n2. 是否存在安全边际\n3. 长期投资价值评估\n4. 投资建议\n\n请在回答开头明确给出操作建议：【买入】【卖出】【持有】",
-    "alertOnSignal": true
-  }
-}
-```
-
-### 示例：动量策略
-
-```json
-{
-  "id": "momentum-strategy",
-  "name": "动量策略",
-  "type": "strategy",
-  "version": "1.0.0",
-  "description": "基于价格动量的短线交易策略",
-  "enabled": true,
-  "config": {
-    "prompt": "你是一个短线交易专家，请基于动量策略分析以下股票：\n\n股票：{name}（{code}）\n当前价格：{price}\n涨跌幅：{changePercent}\n今日最高：{high}\n今日最低：{low}\n成交量：{volume}\n\n近期K线数据：\n{klines}\n\n请分析：\n1. 价格动量\n2. 成交量动量\n3. 短期走势预判\n4. 短线操作建议\n\n请在回答开头明确给出操作建议：【买入】【卖出】【持有】\n并给出具体的止盈止损位。",
-    "alertOnSignal": true
   }
 }
 ```

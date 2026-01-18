@@ -3,12 +3,15 @@ package data
 import (
 	"compress/gzip"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +28,7 @@ type RequestManager struct {
 	config       *models.Config
 	sourceStatus map[string]*SourceStatus
 	rateLimiter  *RateLimiter // 新增：限流器
+	proxyPool    *ProxyPoolState
 	mu           sync.RWMutex
 }
 
@@ -32,7 +36,30 @@ type RequestManager struct {
 type SourceStatus struct {
 	FailCount    int
 	LastFailTime time.Time
+	LastSuccess  time.Time
+	LastChecked  time.Time
+	LastLatency  time.Duration
 	Disabled     bool
+}
+
+// ProxyPoolState 代理池状态
+type ProxyPoolState struct {
+	proxies   []string
+	expiresAt time.Time
+	current   int
+	mu        sync.Mutex
+	lastFetch time.Time
+	lastError string
+}
+
+func (ps *ProxyPoolState) reset() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.proxies = nil
+	ps.expiresAt = time.Time{}
+	ps.current = 0
+	ps.lastFetch = time.Time{}
+	ps.lastError = ""
 }
 
 // Cache 缓存管理
@@ -98,8 +125,9 @@ func NewRequestManager() *RequestManager {
 		},
 		sourceStatus: make(map[string]*SourceStatus),
 		rateLimiter:  GetRateLimiter(), // 初始化限流器
+		proxyPool:    &ProxyPoolState{},
 	}
-	rm.initClient(nil)
+	rm.initClient()
 
 	// 启动缓存清理调度器
 	go rm.startCacheCleanupScheduler()
@@ -108,19 +136,14 @@ func NewRequestManager() *RequestManager {
 }
 
 // initClient 初始化HTTP客户端
-func (rm *RequestManager) initClient(proxyURL *string) {
+func (rm *RequestManager) initClient() {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{},
 		MaxIdleConns:    100,
 		IdleConnTimeout: 90 * time.Second,
 	}
 
-	// 设置代理
-	if proxyURL != nil && *proxyURL != "" {
-		if proxy, err := url.Parse(*proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(proxy)
-		}
-	}
+	transport.Proxy = rm.proxySelectorFunc()
 
 	rm.client = &http.Client{
 		Timeout:   3 * time.Second, // 3秒超时，正常API应该在1秒内响应
@@ -128,17 +151,370 @@ func (rm *RequestManager) initClient(proxyURL *string) {
 	}
 }
 
+func (rm *RequestManager) proxySelectorFunc() func(*http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
+		rm.mu.RLock()
+		cfg := rm.config
+		rm.mu.RUnlock()
+
+		if hasProxyConfigured(cfg) {
+			if proxyStr := rm.getProxyFromPool(cfg); proxyStr != "" {
+				if proxyURL, err := url.Parse(proxyStr); err == nil {
+					return proxyURL, nil
+				}
+				log.Printf("[ProxyPool] 解析代理失败: %v", proxyStr)
+			}
+		}
+
+		return nil, nil
+	}
+}
+
+func (rm *RequestManager) getProxyFromPool(cfg *models.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	customPoolConfigured := strings.TrimSpace(cfg.ProxyPoolList) != "" || cfg.ProxyApiUrl != "" || cfg.ProxyApiKey != ""
+	if !cfg.ProxyPoolEnabled && !customPoolConfigured {
+		return strings.TrimSpace(cfg.ProxyUrl)
+	}
+	if rm.proxyPool == nil {
+		rm.proxyPool = &ProxyPoolState{}
+	}
+	pp := rm.proxyPool
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+
+	now := time.Now()
+	if len(pp.proxies) == 0 || (!pp.expiresAt.IsZero() && now.After(pp.expiresAt)) {
+		proxies, ttl, err := rm.fetchProxyList(cfg)
+		if err != nil {
+			log.Printf("[ProxyPool] 获取代理失败: %v", err)
+			pp.proxies = nil
+			pp.expiresAt = time.Time{}
+			pp.current = 0
+			pp.lastError = err.Error()
+			return ""
+		}
+		if len(proxies) == 0 {
+			log.Printf("[ProxyPool] 代理列表为空")
+			pp.lastError = "empty proxy list"
+			return ""
+		}
+		if ttl <= 0 {
+			ttl = rm.getProxyPoolTTL(cfg)
+		}
+		pp.proxies = proxies
+		pp.expiresAt = now.Add(ttl)
+		pp.current = 0
+		pp.lastFetch = now
+		pp.lastError = ""
+		log.Printf("[ProxyPool] 拉取到 %d 个代理，有效期 %s", len(proxies), ttl)
+	}
+
+	if len(pp.proxies) == 0 {
+		return ""
+	}
+
+	proxy := pp.proxies[pp.current]
+	pp.current = (pp.current + 1) % len(pp.proxies)
+	return proxy
+}
+
+func (rm *RequestManager) fetchProxyList(cfg *models.Config) ([]string, time.Duration, error) {
+	scheme := getProxyScheme(cfg)
+	provider := strings.ToLower(cfg.ProxyProvider)
+	manualList := strings.TrimSpace(cfg.ProxyPoolList)
+	if provider == "custom_list" || manualList != "" {
+		proxies := parseProxyText(manualList, scheme)
+		if len(proxies) == 0 && cfg.ProxyUrl != "" {
+			proxies = []string{cfg.ProxyUrl}
+		}
+		if len(proxies) == 0 {
+			return nil, 0, fmt.Errorf("自定义代理列表为空")
+		}
+		return proxies, rm.getProxyPoolTTL(cfg), nil
+	}
+
+	apiURL := rm.buildProxyAPIURL(cfg)
+	if apiURL != "" {
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(apiURL)
+		if err == nil {
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				if body, err := io.ReadAll(resp.Body); err == nil {
+					if proxies, ttl := rm.parseProxyAPIResponse(body, scheme); len(proxies) > 0 {
+						if ttl <= 0 {
+							ttl = rm.getProxyPoolTTL(cfg)
+						}
+						return proxies, ttl, nil
+					} else {
+						log.Printf("[ProxyPool] 代理API未返回有效结果: %s", string(body))
+					}
+				}
+			} else {
+				log.Printf("[ProxyPool] 代理API状态码: %d", resp.StatusCode)
+			}
+		} else {
+			log.Printf("[ProxyPool] 请求代理API失败: %v", err)
+		}
+	}
+
+	if cfg.ProxyUrl != "" {
+		return []string{cfg.ProxyUrl}, rm.getProxyPoolTTL(cfg), nil
+	}
+
+	return nil, 0, fmt.Errorf("未配置可用的代理源")
+}
+
+func (rm *RequestManager) getProxyPoolTTL(cfg *models.Config) time.Duration {
+	ttl := time.Duration(cfg.ProxyPoolTTL) * time.Second
+	if ttl <= 0 {
+		ttl = 60 * time.Second
+	}
+	return ttl
+}
+
+func (rm *RequestManager) buildProxyAPIURL(cfg *models.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	count := cfg.ProxyPoolSize
+	if count <= 0 {
+		count = 5
+	}
+
+	template := cfg.ProxyApiUrl
+	switch strings.ToLower(cfg.ProxyProvider) {
+	case "kuaidaili":
+		if template == "" {
+			template = "https://dps.kdlapi.com/api/getdps/?secret_id={apiKey}&signature={apiSecret}&num={num}&pt=1&format=json&sep=1"
+		}
+	case "qingguo":
+		if template == "" {
+			template = "https://proxy.qg.net/allocate?Key={apiKey}&Num={num}&Format=json"
+		}
+	case "custom_api", "":
+		// 使用用户输入
+	default:
+		if template == "" {
+			template = cfg.ProxyApiUrl
+		}
+	}
+
+	return replaceProxyPlaceholders(template, cfg, count)
+}
+
+func (rm *RequestManager) parseProxyAPIResponse(body []byte, scheme string) ([]string, time.Duration) {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return nil, 0
+	}
+
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var data interface{}
+		if err := json.Unmarshal(body, &data); err == nil {
+			proxies := extractProxyStrings(data, scheme)
+			ttl := extractProxyTTL(data)
+			return proxies, ttl
+		}
+	}
+
+	return parseProxyText(trimmed, scheme), 0
+}
+
+func replaceProxyPlaceholders(template string, cfg *models.Config, count int) string {
+	if template == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"{apiKey}", url.QueryEscape(cfg.ProxyApiKey),
+		"{token}", url.QueryEscape(cfg.ProxyApiKey),
+		"{secret}", url.QueryEscape(cfg.ProxyApiSecret),
+		"{apiSecret}", url.QueryEscape(cfg.ProxyApiSecret),
+		"{signature}", url.QueryEscape(cfg.ProxyApiSecret),
+		"{region}", url.QueryEscape(cfg.ProxyRegion),
+		"{num}", fmt.Sprintf("%d", count),
+	)
+	return replacer.Replace(template)
+}
+
+func extractProxyStrings(data interface{}, scheme string) []string {
+	switch v := data.(type) {
+	case []interface{}:
+		var result []string
+		for _, item := range v {
+			switch iv := item.(type) {
+			case string:
+				if proxy := normalizeProxyString(iv, scheme); proxy != "" {
+					result = append(result, proxy)
+				}
+			case map[string]interface{}:
+				if proxy := buildProxyFromMap(iv, scheme); proxy != "" {
+					result = append(result, proxy)
+					continue
+				}
+				result = append(result, extractProxyStrings(iv, scheme)...)
+			default:
+				result = append(result, extractProxyStrings(iv, scheme)...)
+			}
+		}
+		return result
+	case map[string]interface{}:
+		if proxy := buildProxyFromMap(v, scheme); proxy != "" {
+			return []string{proxy}
+		}
+		keys := []string{"proxy", "proxy_list", "proxyList", "data", "result", "results", "list", "ips"}
+		for _, key := range keys {
+			if child, ok := v[key]; ok {
+				if result := extractProxyStrings(child, scheme); len(result) > 0 {
+					return result
+				}
+			}
+		}
+	case string:
+		return parseProxyText(v, scheme)
+	}
+	return nil
+}
+
+func buildProxyFromMap(data map[string]interface{}, scheme string) string {
+	ip, ipOk := data["ip"]
+	port, portOk := data["port"]
+	if ipOk && portOk {
+		return normalizeProxyString(fmt.Sprintf("%v:%v", ip, port), scheme)
+	}
+	return ""
+}
+
+func extractProxyTTL(data interface{}) time.Duration {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		keys := []string{"ttl", "expire", "timeout", "expiration", "expire_time"}
+		for _, key := range keys {
+			if val, ok := v[key]; ok {
+				if ttl := numericToDuration(val); ttl > 0 {
+					return ttl
+				}
+			}
+		}
+		for _, val := range v {
+			if ttl := extractProxyTTL(val); ttl > 0 {
+				return ttl
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if ttl := extractProxyTTL(item); ttl > 0 {
+				return ttl
+			}
+		}
+	}
+	return 0
+}
+
+func numericToDuration(value interface{}) time.Duration {
+	switch v := value.(type) {
+	case float64:
+		if v > 0 {
+			return time.Duration(int(v)) * time.Second
+		}
+	case int:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case int64:
+		if v > 0 {
+			return time.Duration(v) * time.Second
+		}
+	case string:
+		if v == "" {
+			return 0
+		}
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 0
+}
+
+func parseProxyText(text string, scheme string) []string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
+	}
+	separators := func(r rune) bool {
+		switch r {
+		case '\n', '\r', '\t', ',', ';', '|':
+			return true
+		}
+		return false
+	}
+	parts := strings.FieldsFunc(trimmed, separators)
+	var result []string
+	for _, part := range parts {
+		if proxy := normalizeProxyString(part, scheme); proxy != "" {
+			result = append(result, proxy)
+		}
+	}
+	return result
+}
+
+func normalizeProxyString(value string, scheme string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "socks5://") {
+		return value
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+	if !strings.HasSuffix(scheme, "://") {
+		scheme += "://"
+	}
+	return scheme + value
+}
+
+func getProxyScheme(cfg *models.Config) string {
+	if cfg == nil || cfg.ProxyPoolProtocol == "" {
+		return "http"
+	}
+	return strings.ToLower(cfg.ProxyPoolProtocol)
+}
+
+func hasProxyConfigured(cfg *models.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.ProxyPoolEnabled {
+		return true
+	}
+	if strings.TrimSpace(cfg.ProxyPoolList) != "" {
+		return true
+	}
+	if cfg.ProxyApiUrl != "" || cfg.ProxyApiKey != "" {
+		return true
+	}
+	if cfg.ProxyUrl != "" {
+		return true
+	}
+	return false
+}
+
 // UpdateConfig 更新配置
 func (rm *RequestManager) UpdateConfig(config *models.Config) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	rm.config = config
-	var proxyURL *string
-	if config != nil && config.ProxyUrl != "" {
-		proxyURL = &config.ProxyUrl
+	if rm.proxyPool != nil {
+		rm.proxyPool.reset()
 	}
-	// Ensure client is rebuilt so clearing proxy takes effect
-	rm.initClient(proxyURL)
+	rm.initClient()
 }
 
 // GetRandomUA 获取随机User-Agent
@@ -689,6 +1065,44 @@ func (rm *RequestManager) CleanupReportCache() int {
 // CleanupNoticeCache 清理公告缓存
 func (rm *RequestManager) CleanupNoticeCache() int {
 	return rm.CleanupCacheByPrefix("notice_")
+}
+
+// GetProxyStatus 返回代理池状态
+func (rm *RequestManager) GetProxyStatus() models.ProxyStatus {
+	rm.mu.RLock()
+	cfg := rm.config
+	rm.mu.RUnlock()
+
+	status := models.ProxyStatus{
+		Enabled:     hasProxyConfigured(cfg),
+		Provider:    "",
+		PoolEnabled: false,
+	}
+
+	if cfg != nil {
+		status.Provider = cfg.ProxyProvider
+		status.PoolEnabled = cfg.ProxyPoolEnabled || strings.TrimSpace(cfg.ProxyPoolList) != "" || cfg.ProxyApiUrl != "" || cfg.ProxyApiKey != ""
+	}
+
+	if rm.proxyPool != nil {
+		rm.proxyPool.mu.Lock()
+		status.ActiveProxies = len(rm.proxyPool.proxies)
+		if !rm.proxyPool.expiresAt.IsZero() {
+			status.ExpiresAt = rm.proxyPool.expiresAt.Format(time.RFC3339)
+			seconds := int(time.Until(rm.proxyPool.expiresAt).Seconds())
+			if seconds < 0 {
+				seconds = 0
+			}
+			status.ExpiresInSeconds = seconds
+		}
+		if !rm.proxyPool.lastFetch.IsZero() {
+			status.LastFetch = rm.proxyPool.lastFetch.Format(time.RFC3339)
+		}
+		status.LastError = rm.proxyPool.lastError
+		rm.proxyPool.mu.Unlock()
+	}
+
+	return status
 }
 
 // GetCacheStats 获取缓存统计信息

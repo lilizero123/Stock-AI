@@ -471,11 +471,11 @@ func (api *StockAPI) GetNewsList() ([]models.NewsItem, error) {
 	var result struct {
 		Data struct {
 			List []struct {
-				Code       string `json:"code"`
-				Title      string `json:"title"`
-				ShowTime   string `json:"showTime"`
-				Digest     string `json:"digest"`
-				MediaName  string `json:"mediaName"`
+				Code      string `json:"code"`
+				Title     string `json:"title"`
+				ShowTime  string `json:"showTime"`
+				Digest    string `json:"digest"`
+				MediaName string `json:"mediaName"`
 			} `json:"list"`
 		} `json:"data"`
 	}
@@ -1416,15 +1416,15 @@ func (api *StockAPI) parseSohuResponseAlt(data string, codeMap map[string]string
 
 // GetReportContent 获取研报内容
 // 注意：东方财富的研报API只返回元数据，不返回实际内容
-// 实际内容需要通过Edge浏览器抓取网页获取
+// 实际内容需要通过浏览器抓取网页获取
 func (api *StockAPI) GetReportContent(infoCode string) (string, error) {
 	if infoCode == "" {
 		return "", fmt.Errorf("infoCode为空")
 	}
 
 	// 东方财富的研报详情API不提供实际内容，只有元数据
-	// 直接返回错误，让调用方使用Edge浏览器获取
-	log.Printf("[研报内容] infoCode: %s - API不提供研报正文，需要使用浏览器获取", infoCode)
+	// 直接返回错误，让调用方使用浏览器获取
+	log.Printf("[研报内容] infoCode: %s - API不提供研报正文，需要使用本地浏览器获取", infoCode)
 	return "", fmt.Errorf("东方财富API不提供研报正文内容")
 }
 
@@ -1578,17 +1578,17 @@ func (api *StockAPI) GetStockPriceFromXueqiu(codes []string) (map[string]*models
 	// 解析响应
 	var jsonResp struct {
 		Data []struct {
-			Symbol     string  `json:"symbol"`
-			Current    float64 `json:"current"`
-			Percent    float64 `json:"percent"`
-			Chg        float64 `json:"chg"`
-			High       float64 `json:"high"`
-			Low        float64 `json:"low"`
-			Open       float64 `json:"open"`
-			LastClose  float64 `json:"last_close"`
-			Volume     int64   `json:"volume"`
-			Amount     float64 `json:"amount"`
-			Time       int64   `json:"time"`
+			Symbol    string  `json:"symbol"`
+			Current   float64 `json:"current"`
+			Percent   float64 `json:"percent"`
+			Chg       float64 `json:"chg"`
+			High      float64 `json:"high"`
+			Low       float64 `json:"low"`
+			Open      float64 `json:"open"`
+			LastClose float64 `json:"last_close"`
+			Volume    int64   `json:"volume"`
+			Amount    float64 `json:"amount"`
+			Time      int64   `json:"time"`
 		} `json:"data"`
 		ErrorCode    int    `json:"error_code"`
 		ErrorMessage string `json:"error_description"`
@@ -1664,18 +1664,18 @@ func (api *StockAPI) GetStockPriceFromBaidu(codes []string) (map[string]*models.
 	var jsonResp struct {
 		Result struct {
 			List []struct {
-				Code          string `json:"code"`
-				Name          string `json:"name"`
-				Price         string `json:"price"`
-				Ratio         string `json:"ratio"`
-				Increase      string `json:"increase"`
-				Open          string `json:"open"`
-				PreClose      string `json:"preClose"`
-				High          string `json:"high"`
-				Low           string `json:"low"`
-				Volume        string `json:"volume"`
-				Amount        string `json:"amount"`
-				Exchange      string `json:"exchange"`
+				Code     string `json:"code"`
+				Name     string `json:"name"`
+				Price    string `json:"price"`
+				Ratio    string `json:"ratio"`
+				Increase string `json:"increase"`
+				Open     string `json:"open"`
+				PreClose string `json:"preClose"`
+				High     string `json:"high"`
+				Low      string `json:"low"`
+				Volume   string `json:"volume"`
+				Amount   string `json:"amount"`
+				Exchange string `json:"exchange"`
 			} `json:"list"`
 		} `json:"Result"`
 	}
