@@ -8,6 +8,8 @@ import {data} from '../models';
 
 export function AIAnalyzeByTypeStream(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function AIAnalyzeFundStream(arg1:string):Promise<void>;
+
 export function AIAnalyzeStock(arg1:string):Promise<models.AIChatResponse>;
 
 export function AIAnalyzeStockStream(arg1:string):Promise<void>;
@@ -28,6 +30,10 @@ export function AISummarizeContentStream(arg1:string,arg2:string,arg3:string,arg
 
 export function AddFund(arg1:string):Promise<void>;
 
+export function AddFundAlert(arg1:models.FundAlert):Promise<void>;
+
+export function AddFundPosition(arg1:models.FundPosition):Promise<void>;
+
 export function AddFutures(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function AddHKStock(arg1:string,arg2:string,arg3:string):Promise<void>;
@@ -41,6 +47,8 @@ export function AddStock(arg1:string):Promise<void>;
 export function AddStockAlert(arg1:models.StockAlert):Promise<void>;
 
 export function AddUSStock(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
+export function CheckFundAlerts():Promise<Array<models.AlertNotification>>;
 
 export function CheckStockAlerts():Promise<Array<models.AlertNotification>>;
 
@@ -69,6 +77,10 @@ export function CreatePrompt(arg1:string,arg2:string,arg3:string):Promise<prompt
 export function DeleteAIAnalysisResult(arg1:number):Promise<void>;
 
 export function DeleteAIChatSession(arg1:string):Promise<void>;
+
+export function DeleteFundAlert(arg1:number):Promise<void>;
+
+export function DeleteFundPosition(arg1:number):Promise<void>;
 
 export function DeletePlugin(arg1:string):Promise<void>;
 
@@ -130,7 +142,13 @@ export function GetEnabledDatasourcePlugins():Promise<Array<plugin.Plugin>>;
 
 export function GetForexRates():Promise<Array<models.ForexRate>>;
 
+export function GetFundAlerts(arg1:string):Promise<Array<models.FundAlert>>;
+
 export function GetFundList():Promise<Array<models.Fund>>;
+
+export function GetFundOverview(arg1:string):Promise<models.FundOverview>;
+
+export function GetFundPosition(arg1:string):Promise<models.FundPosition>;
 
 export function GetFundPrice(arg1:Array<string>):Promise<Record<string, models.FundPrice>>;
 
@@ -254,6 +272,8 @@ export function RemoveUSStock(arg1:string):Promise<void>;
 
 export function RenamePrompt(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function ResetFundAlert(arg1:number):Promise<void>;
+
 export function ResetStockAlert(arg1:number):Promise<void>;
 
 export function SaveAIAnalysisResult(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
@@ -284,9 +304,13 @@ export function TestDatasource(arg1:string,arg2:string):Promise<plugin.Datasourc
 
 export function TestNotification(arg1:string):Promise<void>;
 
+export function ToggleFundAlert(arg1:number,arg2:boolean):Promise<void>;
+
 export function TogglePlugin(arg1:string,arg2:boolean):Promise<void>;
 
 export function ToggleStockAlert(arg1:number,arg2:boolean):Promise<void>;
+
+export function UpdateFundPosition(arg1:models.FundPosition):Promise<void>;
 
 export function UpdatePlugin(arg1:Record<string, any>):Promise<void>;
 

@@ -49,6 +49,8 @@ type App struct {
 	stockNoticeCache    map[string][]models.StockNotice
 	stockFinancialCache map[string]*data.FinancialData
 	stockDataCacheLock  sync.RWMutex
+	fundPriceCache      map[string]*models.FundPrice
+	fundPriceCacheLock  sync.RWMutex
 }
 
 const (
@@ -146,6 +148,7 @@ func NewApp() *App {
 		stockReportCache:    make(map[string][]models.ResearchReport),
 		stockNoticeCache:    make(map[string][]models.StockNotice),
 		stockFinancialCache: make(map[string]*data.FinancialData),
+		fundPriceCache:      make(map[string]*models.FundPrice),
 	}
 }
 
@@ -357,9 +360,18 @@ func (a *App) AddFund(code string) error {
 		name = p.Name
 	}
 
+	fundType := ""
+	if detail, err := a.fundAPI.GetFundDetail(code); err == nil && detail != nil {
+		if detail.Name != "" {
+			name = detail.Name
+		}
+		fundType = detail.Type
+	}
+
 	fund := models.Fund{
 		Code: code,
 		Name: name,
+		Type: fundType,
 	}
 
 	return data.GetDB().Create(&fund).Error
@@ -367,12 +379,73 @@ func (a *App) AddFund(code string) error {
 
 // RemoveFund 删除自选基金
 func (a *App) RemoveFund(code string) error {
-	return data.GetDB().Where("code = ?", code).Delete(&models.Fund{}).Error
+	err := data.GetDB().Where("code = ?", code).Delete(&models.Fund{}).Error
+	if err == nil {
+		a.fundPriceCacheLock.Lock()
+		delete(a.fundPriceCache, code)
+		a.fundPriceCacheLock.Unlock()
+	}
+	return err
 }
 
 // GetFundPrice 获取基金估值
 func (a *App) GetFundPrice(codes []string) (map[string]*models.FundPrice, error) {
-	return a.fundAPI.GetFundPrice(codes)
+	prices, err := a.fundAPI.GetFundPrice(codes)
+	if err != nil {
+		return prices, err
+	}
+
+	a.fundPriceCacheLock.Lock()
+	for code, price := range prices {
+		if price != nil {
+			a.fundPriceCache[code] = price
+		}
+	}
+	a.fundPriceCacheLock.Unlock()
+	return prices, nil
+}
+
+// GetFundOverview 获取基金详情
+func (a *App) GetFundOverview(code string) (*models.FundOverview, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, fmt.Errorf("无效的基金代码")
+	}
+
+	priceResult, err := a.GetFundPrice([]string{code})
+	if err != nil {
+		return nil, fmt.Errorf("获取基金估值失败: %v", err)
+	}
+	price := priceResult[code]
+
+	detail, err := a.fundAPI.GetFundDetail(code)
+	if err != nil {
+		return nil, fmt.Errorf("获取基金信息失败: %v", err)
+	}
+
+	history, err := a.fundAPI.GetFundHistory(code, 120)
+	if err != nil {
+		log.Printf("[Fund] 获取历史净值失败: %v", err)
+	}
+
+	stockHoldings, bondHoldings, err := a.fundAPI.GetFundHoldings(code)
+	if err != nil {
+		log.Printf("[Fund] 获取持仓失败: %v", err)
+	}
+
+	notices, err := a.fundAPI.GetFundNotices(code, 20)
+	if err != nil {
+		log.Printf("[Fund] 获取公告失败: %v", err)
+	}
+
+	return &models.FundOverview{
+		Price:         price,
+		Detail:        detail,
+		History:       history,
+		StockHoldings: stockHoldings,
+		BondHoldings:  bondHoldings,
+		Notices:       notices,
+	}, nil
 }
 
 // ========== 期货相关 (暂时禁用，返回空数据) ==========
@@ -908,6 +981,7 @@ func (a *App) getPriceCacheInterval() time.Duration {
 
 func (a *App) refreshPriceCache() error {
 	codes := make(map[string]struct{})
+	fundCodes := make(map[string]struct{})
 
 	var stocks []models.Stock
 	if err := data.GetDB().Find(&stocks).Error; err == nil {
@@ -931,27 +1005,68 @@ func (a *App) refreshPriceCache() error {
 		log.Printf("[PriceCache] 加载提醒失败: %v", err)
 	}
 
-	if len(codes) == 0 {
-		return nil
+	if len(codes) > 0 {
+		codeList := make([]string, 0, len(codes))
+		for code := range codes {
+			codeList = append(codeList, code)
+		}
+
+		prices, err := a.stockAPI.GetStockPrice(codeList)
+		if err != nil {
+			return err
+		}
+
+		a.stockPriceCacheLock.Lock()
+		for code, price := range prices {
+			if price != nil {
+				a.stockPriceCache[code] = price
+			}
+		}
+		a.stockPriceCacheLock.Unlock()
 	}
 
-	codeList := make([]string, 0, len(codes))
-	for code := range codes {
-		codeList = append(codeList, code)
+	var funds []models.Fund
+	if err := data.GetDB().Find(&funds).Error; err == nil {
+		for _, f := range funds {
+			if f.Code != "" {
+				fundCodes[f.Code] = struct{}{}
+			}
+		}
+	} else {
+		log.Printf("[PriceCache] 加载自选基金失败: %v", err)
 	}
 
-	prices, err := a.stockAPI.GetStockPrice(codeList)
-	if err != nil {
-		return err
+	var fundAlerts []models.FundAlert
+	if err := data.GetDB().Find(&fundAlerts).Error; err == nil {
+		for _, alert := range fundAlerts {
+			if alert.FundCode != "" {
+				fundCodes[alert.FundCode] = struct{}{}
+			}
+		}
+	} else {
+		log.Printf("[PriceCache] 加载基金提醒失败: %v", err)
 	}
 
-	a.stockPriceCacheLock.Lock()
-	for code, price := range prices {
-		if price != nil {
-			a.stockPriceCache[code] = price
+	if len(fundCodes) > 0 {
+		codeList := make([]string, 0, len(fundCodes))
+		for code := range fundCodes {
+			codeList = append(codeList, code)
+		}
+
+		prices, err := a.fundAPI.GetFundPrice(codeList)
+		if err != nil {
+			log.Printf("[PriceCache] 获取基金估值失败: %v", err)
+		} else {
+			a.fundPriceCacheLock.Lock()
+			for code, price := range prices {
+				if price != nil {
+					a.fundPriceCache[code] = price
+				}
+			}
+			a.fundPriceCacheLock.Unlock()
 		}
 	}
-	a.stockPriceCacheLock.Unlock()
+
 	return nil
 }
 
@@ -1464,13 +1579,21 @@ func (a *App) AIChat(request models.AIChatRequest) (*models.AIChatResponse, erro
 		{Role: "user", Content: request.Message},
 	}
 
-	// 如果指定了股票代码，添加股票上下文
+	// 如果指定了股票或基金代码，添加上下文
 	if request.StockCode != "" {
 		stockContext, err := a.buildStockContext(request.StockCode)
 		if err == nil && stockContext != "" {
 			messages = []data.ChatMessage{
 				{Role: "system", Content: data.BuildChatSystemPrompt()},
 				{Role: "user", Content: stockContext + "\n\n用户问题：" + request.Message},
+			}
+		}
+	} else if request.FundCode != "" {
+		fundContext, err := a.buildFundContext(request.FundCode)
+		if err == nil && fundContext != "" {
+			messages = []data.ChatMessage{
+				{Role: "system", Content: data.BuildChatSystemPrompt()},
+				{Role: "user", Content: fundContext + "\n\n用户问题：" + request.Message},
 			}
 		}
 	}
@@ -1532,13 +1655,21 @@ func (a *App) AIChatStream(request models.AIChatRequest) error {
 		{Role: "user", Content: request.Message},
 	}
 
-	// 如果指定了股票代码，添加股票上下文
+	// 如果指定了股票或基金代码，添加上下文
 	if request.StockCode != "" {
 		stockContext, err := a.buildStockContext(request.StockCode)
 		if err == nil && stockContext != "" {
 			messages = []data.ChatMessage{
 				{Role: "system", Content: data.BuildChatSystemPrompt()},
 				{Role: "user", Content: stockContext + "\n\n用户问题：" + request.Message},
+			}
+		}
+	} else if request.FundCode != "" {
+		fundContext, err := a.buildFundContext(request.FundCode)
+		if err == nil && fundContext != "" {
+			messages = []data.ChatMessage{
+				{Role: "system", Content: data.BuildChatSystemPrompt()},
+				{Role: "user", Content: fundContext + "\n\n用户问题：" + request.Message},
 			}
 		}
 	}
@@ -1691,6 +1822,66 @@ func (a *App) AIAnalyzeStockStream(code string) error {
 		prompt := data.BuildStockAnalysisPrompt(stock, klines, reports, notices)
 
 		// 调用AI
+		messages := []data.ChatMessage{
+			{Role: "system", Content: data.BuildChatSystemPrompt()},
+			{Role: "user", Content: prompt},
+		}
+
+		ch, err := a.aiClient.ChatStream(messages)
+		if err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "ai-chat-error", err.Error())
+			return
+		}
+
+		for content := range ch {
+			wailsRuntime.EventsEmit(a.ctx, "ai-chat-stream", content)
+		}
+		wailsRuntime.EventsEmit(a.ctx, "ai-chat-done", "")
+	}()
+
+	return nil
+}
+
+// AIAnalyzeFundStream AI分析基金（流式）
+func (a *App) AIAnalyzeFundStream(code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return fmt.Errorf("请输入基金代码")
+	}
+
+	var config models.Config
+	if err := data.GetDB().First(&config).Error; err != nil {
+		wailsRuntime.EventsEmit(a.ctx, "ai-chat-error", "获取配置失败")
+		return err
+	}
+	if !config.AiEnabled {
+		wailsRuntime.EventsEmit(a.ctx, "ai-chat-error", "AI功能未启用，请在设置中开启")
+		return fmt.Errorf("AI功能未启用")
+	}
+	if config.AiApiKey == "" {
+		wailsRuntime.EventsEmit(a.ctx, "ai-chat-error", "请先配置AI API Key")
+		return fmt.Errorf("请先配置AI API Key")
+	}
+	if a.aiClient == nil {
+		a.aiClient = data.NewAIClient(&config)
+	}
+
+	go func() {
+		wailsRuntime.EventsEmit(a.ctx, "ai-chat-stream", "正在获取基金数据...\n\n")
+		overview, err := a.GetFundOverview(code)
+		if err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "ai-chat-error", fmt.Sprintf("获取基金数据失败: %v", err))
+			return
+		}
+
+		prompt := data.BuildFundAnalysisPrompt(
+			overview.Detail,
+			overview.Price,
+			overview.History,
+			overview.StockHoldings,
+			overview.Notices,
+		)
+
 		messages := []data.ChatMessage{
 			{Role: "system", Content: data.BuildChatSystemPrompt()},
 			{Role: "user", Content: prompt},
@@ -2088,6 +2279,20 @@ func (a *App) buildStockContext(code string) (string, error) {
 	notices, _ := a.getStockNoticesCached(code)
 
 	return data.BuildStockAnalysisPrompt(stock, klines, reports, notices), nil
+}
+
+func (a *App) buildFundContext(code string) (string, error) {
+	overview, err := a.GetFundOverview(code)
+	if err != nil {
+		return "", err
+	}
+	return data.BuildFundAnalysisPrompt(
+		overview.Detail,
+		overview.Price,
+		overview.History,
+		overview.StockHoldings,
+		overview.Notices,
+	), nil
 }
 
 // AIAnalyzeByType 按类型分析股票（流式）
@@ -2883,6 +3088,45 @@ func (a *App) GetPositionHistory() ([]models.Position, error) {
 	return positions, err
 }
 
+// GetFundPosition 获取基金持仓
+func (a *App) GetFundPosition(fundCode string) (*models.FundPosition, error) {
+	var position models.FundPosition
+	err := data.GetDB().Where("fund_code = ? AND status = ?", fundCode, "holding").First(&position).Error
+	if err != nil {
+		return nil, err
+	}
+	return &position, nil
+}
+
+// AddFundPosition 添加基金持仓
+func (a *App) AddFundPosition(position models.FundPosition) error {
+	position.Status = "holding"
+
+	if position.FundName == "" {
+		if prices, err := a.GetFundPrice([]string{position.FundCode}); err == nil {
+			if p, ok := prices[position.FundCode]; ok && p.Name != "" {
+				position.FundName = p.Name
+			}
+		}
+	}
+
+	if position.CostNav == 0 {
+		position.CostNav = position.BuyNav
+	}
+
+	return data.GetDB().Create(&position).Error
+}
+
+// UpdateFundPosition 更新基金持仓
+func (a *App) UpdateFundPosition(position models.FundPosition) error {
+	return data.GetDB().Save(&position).Error
+}
+
+// DeleteFundPosition 删除基金持仓
+func (a *App) DeleteFundPosition(id uint) error {
+	return data.GetDB().Delete(&models.FundPosition{}, id).Error
+}
+
 // ========== AI 历史记录管理 ==========
 
 // AIChatSession AI聊天会话
@@ -3391,6 +3635,7 @@ func (a *App) CheckStockAlerts() ([]models.AlertNotification, error) {
 				CurrentChange: price.ChangePercent,
 				Message:       message,
 				Time:          now.Format("15:04:05"),
+				AssetType:     "stock",
 			}
 
 			// 添加通知
@@ -3434,6 +3679,164 @@ func (a *App) CheckStockAlerts() ([]models.AlertNotification, error) {
 	return notifications, nil
 }
 
+// GetFundAlerts 获取基金提醒
+func (a *App) GetFundAlerts(fundCode string) ([]models.FundAlert, error) {
+	var alerts []models.FundAlert
+	query := data.GetDB().Where("enabled = ?", true)
+	if fundCode != "" {
+		query = query.Where("fund_code = ?", fundCode)
+	}
+	err := query.Order("created_at DESC").Find(&alerts).Error
+	return alerts, err
+}
+
+// AddFundAlert 添加基金提醒
+func (a *App) AddFundAlert(alert models.FundAlert) error {
+	alert.Enabled = true
+	alert.Triggered = false
+	return data.GetDB().Create(&alert).Error
+}
+
+// DeleteFundAlert 删除基金提醒
+func (a *App) DeleteFundAlert(id uint) error {
+	return data.GetDB().Delete(&models.FundAlert{}, id).Error
+}
+
+// ToggleFundAlert 切换基金提醒状态
+func (a *App) ToggleFundAlert(id uint, enabled bool) error {
+	return data.GetDB().Model(&models.FundAlert{}).Where("id = ?", id).Update("enabled", enabled).Error
+}
+
+// ResetFundAlert 重置基金提醒
+func (a *App) ResetFundAlert(id uint) error {
+	return data.GetDB().Model(&models.FundAlert{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"triggered":    false,
+		"triggered_at": nil,
+	}).Error
+}
+
+// CheckFundAlerts 检查基金提醒
+func (a *App) CheckFundAlerts() ([]models.AlertNotification, error) {
+	var alerts []models.FundAlert
+	err := data.GetDB().Where("enabled = ? AND triggered = ?", true, false).Find(&alerts).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(alerts) == 0 {
+		return nil, nil
+	}
+
+	a.fundPriceCacheLock.RLock()
+	prices := make(map[string]*models.FundPrice, len(a.fundPriceCache))
+	for code, price := range a.fundPriceCache {
+		prices[code] = price
+	}
+	a.fundPriceCacheLock.RUnlock()
+	if len(prices) == 0 {
+		return nil, nil
+	}
+
+	var pushConfig *models.Config
+	if cfg, err := a.GetConfig(); err == nil && cfg.AlertPushEnabled {
+		pushConfig = cfg
+	}
+
+	var notifications []models.AlertNotification
+	now := time.Now()
+
+	for _, alert := range alerts {
+		price, ok := prices[alert.FundCode]
+		if !ok || price == nil {
+			continue
+		}
+
+		currentNav := price.Estimate
+		if currentNav == 0 {
+			currentNav = price.Nav
+		}
+		currentChange := price.ChangePercent
+
+		triggered := false
+		var message string
+
+		switch alert.AlertType {
+		case "nav":
+			if alert.Condition == "above" && currentNav >= alert.TargetValue {
+				triggered = true
+				message = fmt.Sprintf("%s 净值已达到 %.4f（目标：%.4f）", alert.FundName, currentNav, alert.TargetValue)
+			} else if alert.Condition == "below" && currentNav <= alert.TargetValue {
+				triggered = true
+				message = fmt.Sprintf("%s 净值已跌至 %.4f（目标：%.4f）", alert.FundName, currentNav, alert.TargetValue)
+			}
+		case "change":
+			if alert.Condition == "above" && currentChange >= alert.TargetValue {
+				triggered = true
+				message = fmt.Sprintf("%s 涨幅已达 %.2f%%（目标：%.2f%%）", alert.FundName, currentChange, alert.TargetValue)
+			} else if alert.Condition == "below" && currentChange <= -alert.TargetValue {
+				triggered = true
+				message = fmt.Sprintf("%s 跌幅已达 %.2f%%（目标：-%.2f%%）", alert.FundName, currentChange, alert.TargetValue)
+			}
+		}
+
+		if !triggered {
+			continue
+		}
+
+		data.GetDB().Model(&alert).Updates(map[string]interface{}{
+			"triggered":        true,
+			"triggered_at":     now,
+			"triggered_nav":    currentNav,
+			"triggered_change": currentChange,
+		})
+
+		notification := models.AlertNotification{
+			ID:            alert.ID,
+			StockCode:     alert.FundCode,
+			StockName:     alert.FundName,
+			AlertType:     alert.AlertType,
+			TargetValue:   alert.TargetValue,
+			CurrentPrice:  currentNav,
+			CurrentChange: currentChange,
+			Message:       message,
+			Time:          now.Format("15:04:05"),
+			AssetType:     "fund",
+		}
+
+		notifications = append(notifications, notification)
+		wailsRuntime.EventsEmit(a.ctx, "fund-alert-triggered", notification)
+
+		if pushConfig != nil {
+			go a.dispatchAlertPush(pushConfig, notification)
+		}
+
+		if a.pluginManager.HasEnabledNotificationPlugins() {
+			alertTypeText := "基金净值提醒"
+			if alert.AlertType == "change" {
+				alertTypeText = "基金涨跌提醒"
+			}
+			conditionText := "高于"
+			if alert.Condition == "below" {
+				conditionText = "低于"
+			}
+
+			notifyData := &plugin.NotificationData{
+				StockCode:     alert.FundCode,
+				StockName:     alert.FundName,
+				AlertType:     alertTypeText,
+				CurrentPrice:  currentNav,
+				Condition:     conditionText,
+				TargetValue:   alert.TargetValue,
+				TriggerTime:   now.Format("2006-01-02 15:04:05"),
+				Change:        currentChange,
+				ChangePercent: currentChange,
+			}
+			go a.pluginManager.SendNotificationToAll(notifyData)
+		}
+	}
+
+	return notifications, nil
+}
+
 // TestAlertPush 测试外部推送通道
 func (a *App) TestAlertPush(channel string) error {
 	cfg, err := a.GetConfig()
@@ -3451,6 +3854,7 @@ func (a *App) TestAlertPush(channel string) error {
 		CurrentChange: 0.56,
 		Message:       "测试提醒：当前价格 3210.00，预设目标 3200.00",
 		Time:          time.Now().Format("15:04:05"),
+		AssetType:     "stock",
 	}
 
 	switch strings.ToLower(channel) {
@@ -3478,7 +3882,11 @@ func (a *App) dispatchAlertPush(cfg *models.Config, notification models.AlertNot
 	if cfg == nil {
 		return
 	}
-	title := fmt.Sprintf("%s提醒", notification.StockName)
+	assetLabel := "股票"
+	if notification.AssetType == "fund" {
+		assetLabel = "基金"
+	}
+	title := fmt.Sprintf("%s%s提醒", notification.StockName, assetLabel)
 	markdown := formatAlertMarkdown(notification)
 	text := formatAlertText(notification)
 
@@ -3501,19 +3909,28 @@ func (a *App) dispatchAlertPush(cfg *models.Config, notification models.AlertNot
 
 func formatAlertMarkdown(n models.AlertNotification) string {
 	var sb strings.Builder
+	priceLabel := "现价"
+	if n.AssetType == "fund" {
+		priceLabel = "净值"
+	}
 	sb.WriteString(fmt.Sprintf("**%s (%s)**\n", n.StockName, n.StockCode))
 	sb.WriteString(fmt.Sprintf("> %s\n", n.Message))
-	sb.WriteString(fmt.Sprintf("> 现价：%.2f | 涨跌：%.2f%%\n", n.CurrentPrice, n.CurrentChange))
+	sb.WriteString(fmt.Sprintf("> %s：%.4f | 涨跌：%.2f%%\n", priceLabel, n.CurrentPrice, n.CurrentChange))
 	sb.WriteString(fmt.Sprintf("> 目标：%.2f | 时间：%s\n", n.TargetValue, n.Time))
 	return sb.String()
 }
 
 func formatAlertText(n models.AlertNotification) string {
+	priceLabel := "现价"
+	if n.AssetType == "fund" {
+		priceLabel = "净值"
+	}
 	return fmt.Sprintf(
-		"%s (%s)\n%s\n现价: %.2f\n涨跌幅: %.2f%%\n目标值: %.2f\n时间: %s\n",
+		"%s (%s)\n%s\n%s: %.4f\n涨跌幅: %.2f%%\n目标值: %.2f\n时间: %s\n",
 		n.StockName,
 		n.StockCode,
 		n.Message,
+		priceLabel,
 		n.CurrentPrice,
 		n.CurrentChange,
 		n.TargetValue,

@@ -51,6 +51,7 @@ func InitDB() error {
 		&models.Fund{},
 		&models.Config{},
 		&models.Position{},
+		&models.FundPosition{},
 		&models.AIMessage{},
 		&models.AIAnalysisResult{},
 		// 新增：全球市场相关模型
@@ -59,6 +60,7 @@ func InitDB() error {
 		&models.HKStock{},
 		// 股票提醒
 		&models.StockAlert{},
+		&models.FundAlert{},
 	)
 	if err != nil {
 		return err

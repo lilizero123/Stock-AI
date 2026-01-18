@@ -6,6 +6,10 @@ export function AIAnalyzeByTypeStream(arg1, arg2, arg3) {
   return window['go']['main']['App']['AIAnalyzeByTypeStream'](arg1, arg2, arg3);
 }
 
+export function AIAnalyzeFundStream(arg1) {
+  return window['go']['main']['App']['AIAnalyzeFundStream'](arg1);
+}
+
 export function AIAnalyzeStock(arg1) {
   return window['go']['main']['App']['AIAnalyzeStock'](arg1);
 }
@@ -46,6 +50,14 @@ export function AddFund(arg1) {
   return window['go']['main']['App']['AddFund'](arg1);
 }
 
+export function AddFundAlert(arg1) {
+  return window['go']['main']['App']['AddFundAlert'](arg1);
+}
+
+export function AddFundPosition(arg1) {
+  return window['go']['main']['App']['AddFundPosition'](arg1);
+}
+
 export function AddFutures(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddFutures'](arg1, arg2, arg3);
 }
@@ -72,6 +84,10 @@ export function AddStockAlert(arg1) {
 
 export function AddUSStock(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['AddUSStock'](arg1, arg2, arg3, arg4);
+}
+
+export function CheckFundAlerts() {
+  return window['go']['main']['App']['CheckFundAlerts']();
 }
 
 export function CheckStockAlerts() {
@@ -128,6 +144,14 @@ export function DeleteAIAnalysisResult(arg1) {
 
 export function DeleteAIChatSession(arg1) {
   return window['go']['main']['App']['DeleteAIChatSession'](arg1);
+}
+
+export function DeleteFundAlert(arg1) {
+  return window['go']['main']['App']['DeleteFundAlert'](arg1);
+}
+
+export function DeleteFundPosition(arg1) {
+  return window['go']['main']['App']['DeleteFundPosition'](arg1);
 }
 
 export function DeletePlugin(arg1) {
@@ -250,8 +274,20 @@ export function GetForexRates() {
   return window['go']['main']['App']['GetForexRates']();
 }
 
+export function GetFundAlerts(arg1) {
+  return window['go']['main']['App']['GetFundAlerts'](arg1);
+}
+
 export function GetFundList() {
   return window['go']['main']['App']['GetFundList']();
+}
+
+export function GetFundOverview(arg1) {
+  return window['go']['main']['App']['GetFundOverview'](arg1);
+}
+
+export function GetFundPosition(arg1) {
+  return window['go']['main']['App']['GetFundPosition'](arg1);
 }
 
 export function GetFundPrice(arg1) {
@@ -498,6 +534,10 @@ export function RenamePrompt(arg1, arg2, arg3) {
   return window['go']['main']['App']['RenamePrompt'](arg1, arg2, arg3);
 }
 
+export function ResetFundAlert(arg1) {
+  return window['go']['main']['App']['ResetFundAlert'](arg1);
+}
+
 export function ResetStockAlert(arg1) {
   return window['go']['main']['App']['ResetStockAlert'](arg1);
 }
@@ -558,12 +598,20 @@ export function TestNotification(arg1) {
   return window['go']['main']['App']['TestNotification'](arg1);
 }
 
+export function ToggleFundAlert(arg1, arg2) {
+  return window['go']['main']['App']['ToggleFundAlert'](arg1, arg2);
+}
+
 export function TogglePlugin(arg1, arg2) {
   return window['go']['main']['App']['TogglePlugin'](arg1, arg2);
 }
 
 export function ToggleStockAlert(arg1, arg2) {
   return window['go']['main']['App']['ToggleStockAlert'](arg1, arg2);
+}
+
+export function UpdateFundPosition(arg1) {
+  return window['go']['main']['App']['UpdateFundPosition'](arg1);
 }
 
 export function UpdatePlugin(arg1) {

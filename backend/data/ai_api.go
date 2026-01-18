@@ -332,13 +332,109 @@ func BuildStockAnalysisPrompt(stock *models.StockPrice, klines []models.KLineDat
 	return sb.String()
 }
 
+// BuildFundAnalysisPrompt 构建基金分析提示词
+func BuildFundAnalysisPrompt(detail *models.FundDetail, price *models.FundPrice, history []models.FundPerformancePoint, holdings []models.FundHolding, notices []models.FundNotice) string {
+	var sb strings.Builder
+	sb.WriteString("请分析以下基金的投资价值：\n\n")
+
+	if detail != nil {
+		sb.WriteString("## 基本信息\n")
+		sb.WriteString(fmt.Sprintf("- 代码：%s\n", detail.Code))
+		sb.WriteString(fmt.Sprintf("- 名称：%s\n", detail.Name))
+		sb.WriteString(fmt.Sprintf("- 类型：%s\n", detail.Type))
+		sb.WriteString(fmt.Sprintf("- 风险等级：%s\n", detail.RiskLevel))
+		sb.WriteString(fmt.Sprintf("- 基金经理：%s\n", detail.Manager))
+		sb.WriteString(fmt.Sprintf("- 基金公司：%s\n", detail.Company))
+		sb.WriteString(fmt.Sprintf("- 成立日期：%s\n", detail.InceptionDate))
+		if detail.Scale > 0 {
+			sb.WriteString(fmt.Sprintf("- 最新规模：%.2f 亿\n", detail.Scale/100000000))
+		}
+		sb.WriteString(fmt.Sprintf("- 最新净值日期：%s\n\n", detail.NavDate))
+		sb.WriteString("### 业绩表现\n")
+		sb.WriteString(fmt.Sprintf("- 日涨跌幅：%.2f%%\n", detail.OneDayReturn))
+		sb.WriteString(fmt.Sprintf("- 近1年收益：%.2f%%\n", detail.OneYearReturn))
+		sb.WriteString(fmt.Sprintf("- 近3年收益：%.2f%%\n", detail.ThreeYearReturn))
+		sb.WriteString(fmt.Sprintf("- 今年以来：%.2f%%\n", detail.ThisYearReturn))
+		sb.WriteString(fmt.Sprintf("- 成立以来：%.2f%%\n", detail.SinceStartReturn))
+		if detail.SharpRatio != 0 {
+			sb.WriteString(fmt.Sprintf("- 夏普比率：%.2f\n", detail.SharpRatio))
+		}
+		if detail.MaxDrawdown != 0 {
+			sb.WriteString(fmt.Sprintf("- 最大回撤：%.2f%%\n", detail.MaxDrawdown))
+		}
+		sb.WriteString("\n")
+	}
+
+	if price != nil {
+		sb.WriteString("## 实时估值\n")
+		sb.WriteString(fmt.Sprintf("- 净值：%.4f\n", price.Nav))
+		sb.WriteString(fmt.Sprintf("- 估算净值：%.4f\n", price.Estimate))
+		sb.WriteString(fmt.Sprintf("- 估算涨跌幅：%.2f%%\n", price.ChangePercent))
+		sb.WriteString(fmt.Sprintf("- 更新时间：%s\n\n", price.UpdateTime))
+	}
+
+	if len(history) > 0 {
+		sb.WriteString("## 近期净值走势（最近10条）\n")
+		limit := len(history)
+		if limit > 10 {
+			limit = 10
+		}
+		for i := len(history) - limit; i < len(history); i++ {
+			h := history[i]
+			sb.WriteString(fmt.Sprintf("- %s: 净值 %.4f (累计 %.4f, 涨跌 %.2f%%)\n",
+				h.Date, h.Nav, h.AccNav, h.ChangePercent))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(holdings) > 0 {
+		sb.WriteString("## 前五大重仓股\n")
+		count := len(holdings)
+		if count > 5 {
+			count = 5
+		}
+		for i := 0; i < count; i++ {
+			h := holdings[i]
+			sb.WriteString(fmt.Sprintf("- %s(%s) 占比 %.2f%% 行业：%s 变动：%s %.2f%%\n",
+				h.Name, h.Code, h.Ratio, h.Industry, h.Trend, h.Change))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(notices) > 0 {
+		sb.WriteString("## 最新公告\n")
+		count := len(notices)
+		if count > 5 {
+			count = 5
+		}
+		for i := 0; i < count; i++ {
+			n := notices[i]
+			sb.WriteString(fmt.Sprintf("- [%s] %s (%s)\n", n.Date, n.Title, n.Category))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(`
+请从以下角度分析：
+1. **基金定位**：基金类型、风险收益特征、适合何种投资者
+2. **业绩评估**：根据收益、回撤、夏普比率等指标分析业绩的稳定性
+3. **持仓风格**：重点关注前十大持仓及其行业分布
+4. **风险提示**：指出可能面临的市场风险、风格风险
+5. **综合建议**：给出买入/持有/观望建议，并说明理由
+
+重要声明：分析仅供学习研究参考，不构成任何投资建议。投资有风险，入市需谨慎。
+`)
+
+	return sb.String()
+}
+
 // BuildChatSystemPrompt 构建聊天系统提示词
 func BuildChatSystemPrompt() string {
-	return `你是一个股票数据分析助手，具有以下能力：
-1. 分析股票的技术面和基本面数据
-2. 解读财经新闻和公告内容
+	return `你是一个股票/基金数据分析助手，具有以下能力：
+1. 分析股票和基金的行情、业绩、持仓等数据
+2. 解读财经新闻、公告、调研报告内容
 3. 提供数据分析参考和风险提示
-4. 回答股票相关的各种问题
+4. 回答投资研究相关的各种问题
 
 请注意：
 - 你的所有分析仅供学习研究参考，不构成任何投资建议

@@ -307,6 +307,7 @@ export namespace models {
 	    message: string;
 	    sessionId: string;
 	    stockCode?: string;
+	    fundCode?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AIChatRequest(source);
@@ -317,6 +318,7 @@ export namespace models {
 	        this.message = source["message"];
 	        this.sessionId = source["sessionId"];
 	        this.stockCode = source["stockCode"];
+	        this.fundCode = source["fundCode"];
 	    }
 	}
 	export class AIChatResponse {
@@ -384,6 +386,7 @@ export namespace models {
 	    currentChange: number;
 	    message: string;
 	    time: string;
+	    assetType: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AlertNotification(source);
@@ -400,6 +403,7 @@ export namespace models {
 	        this.currentChange = source["currentChange"];
 	        this.message = source["message"];
 	        this.time = source["time"];
+	        this.assetType = source["assetType"];
 	    }
 	}
 	export class Config {
@@ -651,6 +655,297 @@ export namespace models {
 		    return a;
 		}
 	}
+	export class FundAlert {
+	    id: number;
+	    fundCode: string;
+	    fundName: string;
+	    alertType: string;
+	    targetValue: number;
+	    condition: string;
+	    enabled: boolean;
+	    triggered: boolean;
+	    // Go type: time
+	    triggeredAt?: any;
+	    triggeredNav: number;
+	    triggeredChange: number;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    updatedAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundAlert(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.fundCode = source["fundCode"];
+	        this.fundName = source["fundName"];
+	        this.alertType = source["alertType"];
+	        this.targetValue = source["targetValue"];
+	        this.condition = source["condition"];
+	        this.enabled = source["enabled"];
+	        this.triggered = source["triggered"];
+	        this.triggeredAt = this.convertValues(source["triggeredAt"], null);
+	        this.triggeredNav = source["triggeredNav"];
+	        this.triggeredChange = source["triggeredChange"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.updatedAt = this.convertValues(source["updatedAt"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class FundDetail {
+	    code: string;
+	    name: string;
+	    type: string;
+	    riskLevel: string;
+	    manager: string;
+	    company: string;
+	    scale: number;
+	    scaleDate: string;
+	    inceptionDate: string;
+	    navDate: string;
+	    nav: number;
+	    estimate: number;
+	    oneDayReturn: number;
+	    oneYearReturn: number;
+	    threeYearReturn: number;
+	    thisYearReturn: number;
+	    sinceStartReturn: number;
+	    sharpRatio: number;
+	    maxDrawdown: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.riskLevel = source["riskLevel"];
+	        this.manager = source["manager"];
+	        this.company = source["company"];
+	        this.scale = source["scale"];
+	        this.scaleDate = source["scaleDate"];
+	        this.inceptionDate = source["inceptionDate"];
+	        this.navDate = source["navDate"];
+	        this.nav = source["nav"];
+	        this.estimate = source["estimate"];
+	        this.oneDayReturn = source["oneDayReturn"];
+	        this.oneYearReturn = source["oneYearReturn"];
+	        this.threeYearReturn = source["threeYearReturn"];
+	        this.thisYearReturn = source["thisYearReturn"];
+	        this.sinceStartReturn = source["sinceStartReturn"];
+	        this.sharpRatio = source["sharpRatio"];
+	        this.maxDrawdown = source["maxDrawdown"];
+	    }
+	}
+	export class FundHolding {
+	    code: string;
+	    name: string;
+	    ratio: number;
+	    industry: string;
+	    trend: string;
+	    change: number;
+	    type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundHolding(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.name = source["name"];
+	        this.ratio = source["ratio"];
+	        this.industry = source["industry"];
+	        this.trend = source["trend"];
+	        this.change = source["change"];
+	        this.type = source["type"];
+	    }
+	}
+	export class FundNotice {
+	    id: string;
+	    title: string;
+	    date: string;
+	    category: string;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundNotice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.date = source["date"];
+	        this.category = source["category"];
+	        this.url = source["url"];
+	    }
+	}
+	export class FundPerformancePoint {
+	    date: string;
+	    nav: number;
+	    accNav: number;
+	    changePercent: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundPerformancePoint(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.date = source["date"];
+	        this.nav = source["nav"];
+	        this.accNav = source["accNav"];
+	        this.changePercent = source["changePercent"];
+	    }
+	}
+	export class FundPrice {
+	    code: string;
+	    name: string;
+	    nav: number;
+	    estimate: number;
+	    changePercent: number;
+	    updateTime: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundPrice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.name = source["name"];
+	        this.nav = source["nav"];
+	        this.estimate = source["estimate"];
+	        this.changePercent = source["changePercent"];
+	        this.updateTime = source["updateTime"];
+	    }
+	}
+	export class FundOverview {
+	    price?: FundPrice;
+	    detail?: FundDetail;
+	    history: FundPerformancePoint[];
+	    stockHoldings: FundHolding[];
+	    bondHoldings: FundHolding[];
+	    notices: FundNotice[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FundOverview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.price = this.convertValues(source["price"], FundPrice);
+	        this.detail = this.convertValues(source["detail"], FundDetail);
+	        this.history = this.convertValues(source["history"], FundPerformancePoint);
+	        this.stockHoldings = this.convertValues(source["stockHoldings"], FundHolding);
+	        this.bondHoldings = this.convertValues(source["bondHoldings"], FundHolding);
+	        this.notices = this.convertValues(source["notices"], FundNotice);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class FundPosition {
+	    id: number;
+	    fundCode: string;
+	    fundName: string;
+	    buyNav: number;
+	    buyDate: string;
+	    share: number;
+	    costNav: number;
+	    targetNav: number;
+	    stopLossNav: number;
+	    notes: string;
+	    status: string;
+	    redeemNav: number;
+	    redeemDate: string;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    updatedAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new FundPosition(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.fundCode = source["fundCode"];
+	        this.fundName = source["fundName"];
+	        this.buyNav = source["buyNav"];
+	        this.buyDate = source["buyDate"];
+	        this.share = source["share"];
+	        this.costNav = source["costNav"];
+	        this.targetNav = source["targetNav"];
+	        this.stopLossNav = source["stopLossNav"];
+	        this.notes = source["notes"];
+	        this.status = source["status"];
+	        this.redeemNav = source["redeemNav"];
+	        this.redeemDate = source["redeemDate"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.updatedAt = this.convertValues(source["updatedAt"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class Futures {
 	    id: number;
 	    code: string;

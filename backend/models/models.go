@@ -73,6 +73,67 @@ type FundPrice struct {
 	UpdateTime    string  `json:"updateTime"`
 }
 
+// FundDetail 基金详情
+type FundDetail struct {
+	Code             string  `json:"code"`
+	Name             string  `json:"name"`
+	Type             string  `json:"type"`
+	RiskLevel        string  `json:"riskLevel"`
+	Manager          string  `json:"manager"`
+	Company          string  `json:"company"`
+	Scale            float64 `json:"scale"`
+	ScaleDate        string  `json:"scaleDate"`
+	InceptionDate    string  `json:"inceptionDate"`
+	NavDate          string  `json:"navDate"`
+	Nav              float64 `json:"nav"`
+	Estimate         float64 `json:"estimate"`
+	OneDayReturn     float64 `json:"oneDayReturn"`
+	OneYearReturn    float64 `json:"oneYearReturn"`
+	ThreeYearReturn  float64 `json:"threeYearReturn"`
+	ThisYearReturn   float64 `json:"thisYearReturn"`
+	SinceStartReturn float64 `json:"sinceStartReturn"`
+	SharpRatio       float64 `json:"sharpRatio"`
+	MaxDrawdown      float64 `json:"maxDrawdown"`
+}
+
+// FundPerformancePoint 基金历史净值点
+type FundPerformancePoint struct {
+	Date          string  `json:"date"`
+	Nav           float64 `json:"nav"`
+	AccNav        float64 `json:"accNav"`
+	ChangePercent float64 `json:"changePercent"`
+}
+
+// FundHolding 基金持仓
+type FundHolding struct {
+	Code     string  `json:"code"`
+	Name     string  `json:"name"`
+	Ratio    float64 `json:"ratio"`
+	Industry string  `json:"industry"`
+	Trend    string  `json:"trend"`
+	Change   float64 `json:"change"`
+	Type     string  `json:"type"`
+}
+
+// FundNotice 基金公告
+type FundNotice struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Date     string `json:"date"`
+	Category string `json:"category"`
+	Url      string `json:"url"`
+}
+
+// FundOverview 基金详情概览
+type FundOverview struct {
+	Price         *FundPrice             `json:"price"`
+	Detail        *FundDetail            `json:"detail"`
+	History       []FundPerformancePoint `json:"history"`
+	StockHoldings []FundHolding          `json:"stockHoldings"`
+	BondHoldings  []FundHolding          `json:"bondHoldings"`
+	Notices       []FundNotice           `json:"notices"`
+}
+
 // MarketIndex 市场指数
 type MarketIndex struct {
 	Code          string  `json:"code"`
@@ -275,6 +336,7 @@ type AIChatRequest struct {
 	Message   string `json:"message"`
 	SessionID string `json:"sessionId"`
 	StockCode string `json:"stockCode,omitempty"`
+	FundCode  string `json:"fundCode,omitempty"`
 }
 
 // AIChatResponse AI聊天响应
@@ -302,6 +364,26 @@ type Position struct {
 	CreatedAt     time.Time      `json:"createdAt"`
 	UpdatedAt     time.Time      `json:"updatedAt"`
 	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// FundPosition 基金持仓信息
+type FundPosition struct {
+	ID          uint           `gorm:"primarykey" json:"id"`
+	FundCode    string         `gorm:"index;size:20" json:"fundCode"`
+	FundName    string         `gorm:"size:100" json:"fundName"`
+	BuyNav      float64        `json:"buyNav"`
+	BuyDate     string         `gorm:"size:20" json:"buyDate"`
+	Share       float64        `json:"share"`
+	CostNav     float64        `json:"costNav"`
+	TargetNav   float64        `json:"targetNav"`
+	StopLossNav float64        `json:"stopLossNav"`
+	Notes       string         `gorm:"type:text" json:"notes"`
+	Status      string         `gorm:"size:20;default:'holding'" json:"status"`
+	RedeemNav   float64        `json:"redeemNav"`
+	RedeemDate  string         `gorm:"size:20" json:"redeemDate"`
+	CreatedAt   time.Time      `json:"createdAt"`
+	UpdatedAt   time.Time      `json:"updatedAt"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // ==================== 期货相关模型 ====================
@@ -468,6 +550,24 @@ type StockAlert struct {
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
+// FundAlert 基金提醒
+type FundAlert struct {
+	ID              uint           `gorm:"primarykey" json:"id"`
+	FundCode        string         `gorm:"index;size:20" json:"fundCode"`
+	FundName        string         `gorm:"size:100" json:"fundName"`
+	AlertType       string         `gorm:"size:20" json:"alertType"` // nav, change
+	TargetValue     float64        `json:"targetValue"`
+	Condition       string         `gorm:"size:10" json:"condition"` // above/below
+	Enabled         bool           `gorm:"default:true" json:"enabled"`
+	Triggered       bool           `gorm:"default:false" json:"triggered"`
+	TriggeredAt     *time.Time     `json:"triggeredAt"`
+	TriggeredNav    float64        `json:"triggeredNav"`
+	TriggeredChange float64        `json:"triggeredChange"`
+	CreatedAt       time.Time      `json:"createdAt"`
+	UpdatedAt       time.Time      `json:"updatedAt"`
+	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
 // AlertNotification 提醒通知（用于前端显示）
 type AlertNotification struct {
 	ID            uint    `json:"id"`
@@ -479,4 +579,5 @@ type AlertNotification struct {
 	CurrentChange float64 `json:"currentChange"`
 	Message       string  `json:"message"`
 	Time          string  `json:"time"`
+	AssetType     string  `json:"assetType"`
 }
