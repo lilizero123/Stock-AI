@@ -146,7 +146,7 @@ func (rm *RequestManager) initClient() {
 	transport.Proxy = rm.proxySelectorFunc()
 
 	rm.client = &http.Client{
-		Timeout:   3 * time.Second, // 3秒超时，正常API应该在1秒内响应
+		Timeout:   5 * time.Second, // 适当放宽超时，避免优质接口偶发超时
 		Transport: transport,
 	}
 }

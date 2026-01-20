@@ -23,7 +23,7 @@ const checking = ref(false)
 const MANUAL_UPDATE_EVENT = 'stock-ai:show-update-dialog'
 
 const changelog = [
-  { version: 'v1.0.0', date: '2025-01-15', content: '首个正式版本发布', type: 'success' },
+  { version: 'v1.0.0', date: '2025-11-15', content: '首个正式版本发布', type: 'success' },
 ]
 
 const features = [
@@ -70,10 +70,6 @@ const checkUpdate = async () => {
   }
 }
 
-const openGitHub = () => {
-  OpenURL('https://github.com')
-}
-
 const openQQ = () => {
   OpenURL('tencent://message/?uin=3946808002&Site=qq&Menu=yes')
 }
@@ -102,7 +98,7 @@ onMounted(() => {
             <n-tag type="info" size="large">v{{ version }}</n-tag>
           </n-descriptions-item>
           <n-descriptions-item label="构建时间">
-            {{ buildTime || '2025-01-15' }}
+            {{ buildTime || '2025-11-15' }}
           </n-descriptions-item>
           <n-descriptions-item label="技术栈">
             Go 1.23 + Wails v2 + Vue3 + Naive UI
@@ -121,7 +117,6 @@ onMounted(() => {
         <!-- 操作按钮 -->
         <n-space>
           <n-button type="primary" :loading="checking" @click="checkUpdate">检查更新</n-button>
-          <n-button @click="openGitHub">访问项目</n-button>
         </n-space>
 
         <div v-if="hasUpdate" class="update-info">

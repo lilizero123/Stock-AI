@@ -20,6 +20,7 @@ import {
   NRadioGroup,
   NRadio,
   NEmpty,
+  NScrollbar,
   useMessage
 } from 'naive-ui'
 import * as echarts from 'echarts'
@@ -449,18 +450,44 @@ const scrollAIToBottom = () => {
   })
 }
 
-const openSummaryModal = (notice) => {
+const formatContent = (content) => {
+  if (!content) return ''
+  let html = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>')
+  html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>')
+  html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>')
+  html = html.replace(/^- (.+)$/gm, '<li>$1</li>')
+  html = html.replace(/\n/g, '<br>')
+  return html
+}
+
+const openSummaryModal = (notice, type = 'notice') => {
   if (!selectedFund.value) return
   summaryTitle.value = notice.title
+  summaryType.value = type
   summaryUrl.value = notice.url || ''
-  summaryInfoCode.value = summaryType.value === 'report' ? notice.infoCode || '' : ''
-  summaryArtCode.value = notice.artCode || ''
+  summaryInfoCode.value = notice.infoCode || ''
+  summaryArtCode.value = notice.artCode || notice.id || ''
   summaryContent.value = ''
   summaryLoading.value = true
   showSummaryModal.value = true
   manualContent.value = ''
   showManualInput.value = false
-  AISummarizeContentStream(notice.title, 'notice', notice.url || '', '', notice.id || '', '', '')
+  AISummarizeContentStream(
+    notice.title,
+    summaryType.value,
+    summaryUrl.value,
+    summaryInfoCode.value,
+    summaryArtCode.value,
+    selectedFund.value?.code || '',
+    ''
+  )
     .catch(e => {
       summaryLoading.value = false
       message.error(`AI解读失败: ${e}`)
@@ -475,7 +502,15 @@ const analyzeManualSummary = () => {
   summaryContent.value = ''
   summaryLoading.value = true
   showManualInput.value = false
-  AISummarizeContentStream(summaryTitle.value, summaryType.value, '', '', '', '', manualContent.value.trim())
+  AISummarizeContentStream(
+    summaryTitle.value,
+    summaryType.value,
+    '',
+    summaryInfoCode.value,
+    summaryArtCode.value,
+    selectedFund.value?.code || '',
+    manualContent.value.trim()
+  )
     .catch(e => {
       summaryLoading.value = false
       message.error(`AI解读失败: ${e}`)
@@ -633,8 +668,18 @@ onUnmounted(() => {
                       <span class="notice-link" @click="goNoticeDetail(item.url)">{{ item.title }}</span>
                     </template>
                     <template #description>
-                      <span>{{ item.date }}</span>
-                      <n-button text size="tiny" @click="openSummaryModal(item)">AI解读</n-button>
+                      <div class="notice-desc">
+                        <span class="notice-date">{{ item.date }}</span>
+                        <n-button
+                          size="tiny"
+                          type="warning"
+                          tertiary
+                          class="notice-ai-btn"
+                          @click="openSummaryModal(item)"
+                        >
+                          AI解读
+                        </n-button>
+                      </div>
                     </template>
                   </n-thing>
                 </n-list-item>
@@ -745,50 +790,109 @@ onUnmounted(() => {
       </n-spin>
     </n-modal>
 
-    <n-modal v-model:show="showAIModal" preset="card" :title="'AI分析 - ' + (selectedFund?.name || '')" style="width: 720px;">
-      <div class="ai-container">
-        <n-alert type="warning" class="disclaimer-alert" :bordered="false">
-          <div class="disclaimer-text">AI分析仅供学习研究参考，不构成任何投资建议。投资有风险，入市需谨慎。</div>
+    <n-modal v-model:show="showAIModal" preset="card" :title="'AI分析 - ' + (selectedFund?.name || '')" style="width: 900px;">
+      <div class="ai-analysis-container">
+        <n-alert type="warning" :bordered="false" class="disclaimer-alert">
+          <template #icon>
+            <span style="font-size: 16px;">⚠️</span>
+          </template>
+          <div class="disclaimer-text">
+            <strong>免责声明：</strong>AI分析仅供学习研究参考，不构成任何投资建议。投资有风险，入市需谨慎。
+          </div>
         </n-alert>
-        <div class="ai-messages">
-          <n-spin :show="aiLoading && !aiMessages.length">
-            <n-empty v-if="!aiMessages.length" description="请稍候，AI正在分析..." />
-            <div v-else ref="aiScrollbarRef" class="ai-scroll">
-              <div v-for="(msg, idx) in aiMessages" :key="idx" class="ai-message" :class="msg.role">
-                <div class="ai-role">{{ msg.role === 'user' ? '我' : 'AI' }}</div>
-                <div class="ai-content">{{ msg.content }}</div>
+
+        <div class="ai-chat-container">
+          <n-scrollbar ref="aiScrollbarRef" style="max-height: 400px;">
+            <div class="ai-messages">
+              <div v-if="aiMessages.length === 0" class="ai-empty-tip">
+                <n-spin v-if="aiLoading" size="small" />
+                <div v-else>点击下方按钮开始AI分析，或直接输入问题进行对话</div>
+              </div>
+              <div
+                v-for="(msg, index) in aiMessages"
+                :key="index"
+                :class="['ai-message', msg.role]"
+              >
+                <div class="ai-message-role">{{ msg.role === 'user' ? '我' : 'AI' }}</div>
+                <div class="ai-message-content">
+                  <n-spin v-if="msg.role === 'assistant' && aiLoading && index === aiMessages.length - 1 && !msg.content" size="small" />
+                  <div v-else class="markdown-content" v-html="formatContent(msg.content)"></div>
+                </div>
               </div>
             </div>
-          </n-spin>
+          </n-scrollbar>
         </div>
-        <div class="ai-input">
-          <n-input
-            v-model:value="aiQuestion"
-            placeholder="向AI追问，如：是否适合长期定投？"
-            @keyup.enter="sendAIQuestion"
-          />
-          <n-button type="primary" :loading="aiLoading" @click="sendAIQuestion">发送</n-button>
+
+        <div class="ai-input-area">
+          <n-space vertical style="width: 100%;">
+            <n-space>
+              <n-button type="primary" :disabled="aiLoading" @click="startFundAIAnalysis">
+                重新分析
+              </n-button>
+            </n-space>
+            <n-input
+              v-model:value="aiQuestion"
+              type="textarea"
+              placeholder="输入问题继续对话，如：这只基金适合定投吗？"
+              :autosize="{ minRows: 2, maxRows: 3 }"
+              :disabled="aiLoading"
+              @keyup.enter.exact="sendAIQuestion"
+            />
+            <n-button type="info" :loading="aiLoading" :disabled="aiLoading || !aiQuestion.trim()" @click="sendAIQuestion">
+              发送问题
+            </n-button>
+          </n-space>
         </div>
       </div>
     </n-modal>
 
-    <n-modal v-model:show="showSummaryModal" preset="card" :title="summaryTitle" style="width: 640px;">
+    <n-modal v-model:show="showSummaryModal" preset="card" :title="'AI解读 - ' + (summaryType === 'report' ? '研报' : '公告')" style="width: 700px;">
       <div class="ai-summary-container">
-        <n-spin :show="summaryLoading">
-          <n-scrollbar ref="summaryScrollbarRef" style="max-height: 360px;">
-            <div class="markdown-content">{{ summaryContent }}</div>
+        <n-alert type="warning" :bordered="false" class="disclaimer-alert">
+          <template #icon>
+            <span style="font-size: 16px;">⚠️</span>
+          </template>
+          <div class="disclaimer-text">
+            <strong>免责声明：</strong>以下内容由AI生成，仅供学习研究参考，不构成任何投资建议。投资有风险，入市需谨慎，盈亏自负。
+          </div>
+        </n-alert>
+
+        <div class="summary-title">{{ summaryTitle }}</div>
+        <div class="summary-content-area">
+          <n-scrollbar ref="summaryScrollbarRef" style="max-height: 320px;">
+            <n-spin v-if="summaryLoading && !summaryContent" size="small" style="display: block; margin: 40px auto;" />
+            <div v-else class="markdown-content" v-html="formatContent(summaryContent)"></div>
           </n-scrollbar>
-        </n-spin>
-        <n-space justify="space-between" style="margin-top: 12px;">
-          <n-button text size="small" @click="showManualInput = !showManualInput">手动粘贴内容重新解析</n-button>
+        </div>
+        <div v-if="summaryLoading" class="summary-loading-tip">AI正在解读中，请稍候...</div>
+
+        <n-space justify="space-between">
           <n-button text size="small" v-if="summaryUrl" @click="OpenURL(summaryUrl)">打开原文</n-button>
+          <span></span>
         </n-space>
-        <div v-if="showManualInput" class="manual-input">
-          <n-input type="textarea" v-model:value="manualContent" placeholder="粘贴公告/研报内容" :autosize="{ minRows: 4, maxRows: 8 }" />
-          <n-space style="margin-top: 8px;" justify="end">
-            <n-button @click="showManualInput = false">取消</n-button>
-            <n-button type="primary" @click="analyzeManualSummary">重新分析</n-button>
-          </n-space>
+
+        <div class="manual-input-section">
+          <n-button
+            v-if="!showManualInput && !summaryLoading"
+            size="small"
+            type="info"
+            dashed
+            @click="showManualInput = true"
+          >
+            内容抓取不完整？点击手动粘贴
+          </n-button>
+          <div v-if="showManualInput" class="manual-input-area">
+            <n-input
+              v-model:value="manualContent"
+              type="textarea"
+              placeholder="从浏览器复制公告/研报内容粘贴到这里，AI会基于文本重新解读"
+              :autosize="{ minRows: 4, maxRows: 8 }"
+            />
+            <n-space style="margin-top: 8px;" justify="end">
+              <n-button size="small" @click="showManualInput = false; manualContent = ''">取消</n-button>
+              <n-button type="primary" size="small" :disabled="!manualContent.trim()" @click="analyzeManualSummary">重新解读</n-button>
+            </n-space>
+          </div>
         </div>
       </div>
     </n-modal>
@@ -831,72 +935,114 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-.ai-container {
+.notice-desc {
   display: flex;
-  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
   gap: 12px;
+  font-size: 12px;
 }
 
-.ai-messages {
-  background: rgba(0, 0, 0, 0.05);
+.notice-date {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.notice-ai-btn :deep(.n-button__content) {
+  font-weight: 600;
+}
+
+.ai-analysis-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ai-chat-container {
+  background: rgba(0, 0, 0, 0.1);
   border-radius: 8px;
-  padding: 12px;
+  padding: 16px;
   min-height: 200px;
 }
 
-.ai-scroll {
-  max-height: 360px;
-  overflow: auto;
+.ai-messages {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.ai-empty-tip {
+  text-align: center;
+  color: #999;
+  padding: 40px;
 }
 
 .ai-message {
   display: flex;
-  gap: 8px;
-  align-items: flex-start;
+  gap: 12px;
 }
 
 .ai-message.user {
   flex-direction: row-reverse;
 }
 
-.ai-role {
+.ai-message-role {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: #2080f0;
-  color: white;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 12px;
+  flex-shrink: 0;
 }
 
-.ai-message.user .ai-role {
+.ai-message.user .ai-message-role {
   background: #18a058;
+  color: white;
 }
 
-.ai-content {
-  padding: 8px 12px;
+.ai-message.assistant .ai-message-role {
+  background: #2080f0;
+  color: white;
+}
+
+.ai-message-content {
+  max-width: 80%;
+  padding: 10px 14px;
   border-radius: 8px;
-  background: white;
-  flex: 1;
   line-height: 1.6;
+  font-size: 14px;
 }
 
-.ai-message.user .ai-content {
-  background: rgba(24, 160, 88, 0.1);
+.ai-message.user .ai-message-content {
+  background: #18a058;
+  color: white;
+  border-bottom-right-radius: 0;
 }
 
-.ai-input {
-  display: flex;
-  gap: 8px;
+.ai-message.assistant .ai-message-content {
+  background: rgba(255, 255, 255, 0.1);
+  border-bottom-left-radius: 0;
 }
 
-.ai-input .n-input {
-  flex: 1;
+.markdown-content :deep(h2),
+.markdown-content :deep(h3),
+.markdown-content :deep(h4) {
+  margin: 10px 0 6px 0;
+}
+
+.markdown-content :deep(strong) {
+  color: #18a058;
+}
+
+.markdown-content :deep(li) {
+  margin: 4px 0;
+  margin-left: 16px;
+}
+
+.ai-input-area {
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .disclaimer-alert {
@@ -915,8 +1061,33 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.manual-input {
-  margin-top: 8px;
+.summary-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.summary-content-area {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  padding: 12px;
+  min-height: 200px;
+}
+
+.summary-loading-tip {
+  font-size: 13px;
+  color: #999;
+}
+
+.manual-input-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.manual-input-area {
+  width: 100%;
 }
 
 .alert-form {

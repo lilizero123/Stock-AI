@@ -18,6 +18,10 @@ export function AIAnalyzeStockStream(arg1) {
   return window['go']['main']['App']['AIAnalyzeStockStream'](arg1);
 }
 
+export function AIAnalyzeTradeLevels(arg1) {
+  return window['go']['main']['App']['AIAnalyzeTradeLevels'](arg1);
+}
+
 export function AIChat(arg1) {
   return window['go']['main']['App']['AIChat'](arg1);
 }
@@ -208,6 +212,10 @@ export function FetchQuoteFromAllPlugins(arg1) {
 
 export function FetchQuoteFromPlugin(arg1, arg2) {
   return window['go']['main']['App']['FetchQuoteFromPlugin'](arg1, arg2);
+}
+
+export function FrontendTrace(arg1) {
+  return window['go']['main']['App']['FrontendTrace'](arg1);
 }
 
 export function GetAIAnalysisHistory() {
@@ -410,6 +418,10 @@ export function GetPositions() {
   return window['go']['main']['App']['GetPositions']();
 }
 
+export function GetProAnalysisCache(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetProAnalysisCache'](arg1, arg2, arg3);
+}
+
 export function GetPrompt(arg1, arg2) {
   return window['go']['main']['App']['GetPrompt'](arg1, arg2);
 }
@@ -504,6 +516,10 @@ export function OpenPromptsDir() {
 
 export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
+}
+
+export function PrefetchTradeLevelData(arg1) {
+  return window['go']['main']['App']['PrefetchTradeLevelData'](arg1);
 }
 
 export function RefreshPlugins() {

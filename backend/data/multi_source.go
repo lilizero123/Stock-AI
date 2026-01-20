@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -953,9 +954,7 @@ func (msm *MultiSourceManager) FetchAStockFromEastmoney(codes []string) (map[str
 	return result, nil
 }
 
-// GetAStockWithFallback 获取A股数据
-// 首次加载：并行请求所有数据源，取最快返回的
-// 后续轮询：按顺序轮询单个数据源
+// GetAStockWithFallback 获取A股数据（全链路并行，谁先返回就用谁的数据）
 func (msm *MultiSourceManager) GetAStockWithFallback(codes []string) (map[string]*models.StockPrice, DataSource, error) {
 	sources := []struct {
 		source DataSource
@@ -966,16 +965,10 @@ func (msm *MultiSourceManager) GetAStockWithFallback(codes []string) (map[string
 		{SourceTencent, msm.FetchAStockFromTencent},
 	}
 
-	// 首次加载：并行请求所有数据源
-	if msm.IsFirstLoad() {
-		return msm.parallelFetchAStock(sources, codes)
-	}
-
-	// 后续轮询：按顺序轮询单个数据源
-	return msm.pollFetchAStock(sources, codes)
+	return msm.parallelFetchAStock(sources, codes)
 }
 
-// parallelFetchAStock 并行获取A股数据（首次加载使用）
+// parallelFetchAStock 并行获取A股数据，谁先返回就用谁的数据
 func (msm *MultiSourceManager) parallelFetchAStock(sources []struct {
 	source DataSource
 	fetch  func([]string) (map[string]*models.StockPrice, error)
@@ -986,40 +979,52 @@ func (msm *MultiSourceManager) parallelFetchAStock(sources []struct {
 		err    error
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	resultChan := make(chan result, len(sources))
 
-	// 并行启动所有数据源请求
 	for _, s := range sources {
 		go func(src DataSource, fetch func([]string) (map[string]*models.StockPrice, error)) {
 			start := time.Now()
 			data, err := fetch(codes)
 			msm.recordProbe(src, start, err)
-			resultChan <- result{data: data, source: src, err: err}
+			select {
+			case resultChan <- result{data: data, source: src, err: err}:
+			case <-ctx.Done():
+			}
 		}(s.source, s.fetch)
 	}
 
-	// 收集所有结果，选择数据最完整的
-	var bestResult result
-	var lastErr error
+	var firstErr error
 	for i := 0; i < len(sources); i++ {
 		res := <-resultChan
+		if res.err == nil && len(res.data) > 0 {
+			msm.MarkSourceSuccess(res.source)
+			msm.SetFirstLoadComplete()
+			cancel()
+			return res.data, res.source, nil
+		}
 		if res.err != nil {
-			lastErr = res.err
+			firstErr = res.err
 			msm.MarkSourceFailed(res.source)
-			continue
-		}
-		if len(res.data) > len(bestResult.data) {
-			bestResult = res
+		} else {
+			if firstErr == nil {
+				if info, ok := msm.sources[res.source]; ok {
+					firstErr = fmt.Errorf("%s返回空数据", info.Name)
+				} else {
+					firstErr = fmt.Errorf("数据源(%d)返回空数据", res.source)
+				}
+			}
+			msm.MarkSourceFailed(res.source)
 		}
 	}
 
-	if len(bestResult.data) > 0 {
-		msm.MarkSourceSuccess(bestResult.source)
-		msm.SetFirstLoadComplete()
-		return bestResult.data, bestResult.source, nil
+	if firstErr == nil {
+		firstErr = fmt.Errorf("所有数据源均返回空数据")
 	}
 
-	return nil, SourceEastmoney, fmt.Errorf("all data sources failed: %v", lastErr)
+	return nil, SourceEastmoney, firstErr
 }
 
 // pollFetchAStock 轮询获取A股数据（后续刷新使用）

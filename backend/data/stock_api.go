@@ -1,6 +1,8 @@
 package data
 
 import (
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +25,12 @@ type StockAPI struct {
 	rm *RequestManager
 }
 
+const (
+	eastMoneyUT      = "fa5fd1943c7b386f172d6893dbfba10b"
+	eastMoneyFields1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12"
+	eastMoneyFields2 = "f51,f52,f53,f54,f55,f56,f57,f58"
+)
+
 // NewStockAPI 创建股票API实例
 func NewStockAPI() *StockAPI {
 	return &StockAPI{
@@ -38,6 +46,58 @@ func (api *StockAPI) getClient() *http.Client {
 // setHeaders 设置请求头
 func (api *StockAPI) setHeaders(req *http.Request, referer string) {
 	api.rm.SetRequestHeaders(req, referer)
+}
+
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	encoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
+	switch {
+	case strings.Contains(encoding, "gzip"):
+		reader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+		return io.ReadAll(reader)
+	case strings.Contains(encoding, "deflate"):
+		reader, err := zlib.NewReader(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer reader.Close()
+		return io.ReadAll(reader)
+	default:
+		return io.ReadAll(resp.Body)
+	}
+}
+
+func (api *StockAPI) doGetWithRetry(rawURL string, referer string, extraHeaders map[string]string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequest("GET", addTimestampParam(rawURL), nil)
+		if err != nil {
+			return nil, err
+		}
+		api.setHeaders(req, referer)
+		for k, v := range extraHeaders {
+			req.Header.Set(k, v)
+		}
+		resp, err := api.getClient().Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			body, readErr := readResponseBody(resp)
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+			} else if resp.StatusCode >= 400 {
+				lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+			} else {
+				return body, nil
+			}
+		}
+		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("请求失败: %w", lastErr)
 }
 
 // GetStockPrice 获取股票实时价格（多数据源轮询）
@@ -320,39 +380,58 @@ func (api *StockAPI) getDefaultMoneyFlow() []models.MoneyFlow {
 
 // GetKLineData 获取K线数据（新浪接口）
 func (api *StockAPI) GetKLineData(code string, period string, count int) ([]models.KLineData, error) {
-	// period: day, week, month
-	scale := "240" // 日K
-	if period == "week" {
+	normCode := normalizeStockCodeForAPI(code)
+	if normCode == "" {
+		return nil, fmt.Errorf("无效的股票代码: %s", code)
+	}
+	if period == "" {
+		period = "daily"
+	}
+	if count <= 0 {
+		count = 240
+	}
+
+	var lastErr error
+	sources := []struct {
+		name  string
+		fetch func(string, string, int) ([]models.KLineData, error)
+	}{
+		{"新浪", api.getKLineFromSina},
+		{"东方财富", api.getKLineFromEastMoney},
+		{"腾讯", api.getKLineFromTencent},
+	}
+
+	for _, src := range sources {
+		if klines, err := src.fetch(normCode, period, count); err == nil && len(klines) > 0 {
+			return klines, nil
+		} else if err != nil {
+			lastErr = err
+			log.Printf("[KLine] %s数据源失败(%s %s): %v", src.name, normCode, period, err)
+		}
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+
+	return nil, fmt.Errorf("暂无可用的K线数据: %s", normCode)
+}
+
+func (api *StockAPI) getKLineFromSina(code string, period string, count int) ([]models.KLineData, error) {
+	scale := "240"
+	switch period {
+	case "week":
 		scale = "1680"
-	} else if period == "month" {
+	case "month":
 		scale = "7200"
 	}
 
-	// 转换代码格式
-	symbol := code
-	if strings.HasPrefix(code, "sh") {
-		symbol = strings.TrimPrefix(code, "sh")
-	} else if strings.HasPrefix(code, "sz") {
-		symbol = strings.TrimPrefix(code, "sz")
-	}
+	url := fmt.Sprintf(
+		"http://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol=%s&scale=%s&ma=no&datalen=%d",
+		code, scale, count,
+	)
 
-	url := fmt.Sprintf("http://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol=%s&scale=%s&ma=no&datalen=%d",
-		code, scale, count)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Referer", "http://finance.sina.com.cn")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	resp, err := api.getClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := api.doGetWithRetry(url, "http://finance.sina.com.cn", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +450,7 @@ func (api *StockAPI) GetKLineData(code string, period string, count int) ([]mode
 	}
 
 	var klines []models.KLineData
+	symbol := trimMarketPrefix(code)
 	for _, item := range data {
 		klines = append(klines, models.KLineData{
 			Date:   item.Day,
@@ -384,6 +464,197 @@ func (api *StockAPI) GetKLineData(code string, period string, count int) ([]mode
 	}
 
 	return klines, nil
+}
+
+func (api *StockAPI) getKLineFromEastMoney(code string, period string, count int) ([]models.KLineData, error) {
+	secid, err := toEastMoneySecID(code)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf(
+		"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s&ut=%s&klt=%s&fqt=1&end=20500101&fields1=%s&fields2=%s&lmt=%d",
+		secid, eastMoneyUT, mapKlinePeriod(period), eastMoneyFields1, eastMoneyFields2, count,
+	)
+
+	body, err := api.doGetWithRetry(url, "https://quote.eastmoney.com", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Data struct {
+			Klines []string `json:"klines"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	if len(result.Data.Klines) == 0 {
+		return nil, fmt.Errorf("东方财富返回空数据")
+	}
+
+	symbol := trimMarketPrefix(code)
+	klines := make([]models.KLineData, 0, len(result.Data.Klines))
+	for _, line := range result.Data.Klines {
+		parts := strings.Split(line, ",")
+		if len(parts) < 6 {
+			continue
+		}
+		vol, _ := strconv.ParseFloat(strings.TrimSpace(parts[5]), 64)
+		klines = append(klines, models.KLineData{
+			Date:   parts[0],
+			Open:   parseFloat(parts[1]),
+			Close:  parseFloat(parts[2]),
+			High:   parseFloat(parts[3]),
+			Low:    parseFloat(parts[4]),
+			Volume: int64(vol * 100),
+			Code:   symbol,
+		})
+	}
+
+	return klines, nil
+}
+
+func (api *StockAPI) getKLineFromTencent(code string, period string, count int) ([]models.KLineData, error) {
+	periodKey := map[string]string{
+		"weekly": "week",
+		"week":   "week",
+		"month":  "month",
+	}
+	klinePeriod := "day"
+	if val, ok := periodKey[period]; ok {
+		klinePeriod = val
+	}
+
+	varName := fmt.Sprintf("kline_%s", klinePeriod)
+	param := fmt.Sprintf("%s,%s,,0,%d", code, klinePeriod, count)
+	url := fmt.Sprintf("https://web.ifzq.gtimg.cn/appstock/app/kline/kline?_var=%s&param=%s", varName, param)
+
+	body, err := api.doGetWithRetry(url, "https://gu.qq.com/", map[string]string{
+		"Referer": "https://gu.qq.com/",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	content := strings.TrimSpace(string(body))
+	if idx := strings.Index(content, "="); idx != -1 {
+		content = content[idx+1:]
+	}
+
+	var result struct {
+		Code int `json:"code"`
+		Data map[string]struct {
+			Day   [][]string `json:"day"`
+			Week  [][]string `json:"week"`
+			Month [][]string `json:"month"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 || len(result.Data) == 0 {
+		return nil, fmt.Errorf("腾讯K线接口返回异常")
+	}
+
+	entry, ok := result.Data[code]
+	if !ok {
+		return nil, fmt.Errorf("腾讯K线缺少股票数据: %s", code)
+	}
+
+	var rows [][]string
+	switch klinePeriod {
+	case "week":
+		rows = entry.Week
+	case "month":
+		rows = entry.Month
+	default:
+		rows = entry.Day
+	}
+
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("腾讯K线数据为空")
+	}
+
+	symbol := trimMarketPrefix(code)
+	klines := make([]models.KLineData, 0, len(rows))
+	for _, item := range rows {
+		if len(item) < 6 {
+			continue
+		}
+		volumeVal := parseFloat(item[5]) * 100 // 腾讯返回手，转换为股
+		klines = append(klines, models.KLineData{
+			Date:   item[0],
+			Open:   parseFloat(item[1]),
+			Close:  parseFloat(item[2]),
+			High:   parseFloat(item[3]),
+			Low:    parseFloat(item[4]),
+			Volume: int64(volumeVal),
+			Code:   symbol,
+		})
+	}
+
+	return klines, nil
+}
+
+func normalizeStockCodeForAPI(code string) string {
+	code = strings.TrimSpace(strings.ToLower(code))
+	if code == "" {
+		return ""
+	}
+	if strings.HasPrefix(code, "sh") || strings.HasPrefix(code, "sz") {
+		return code
+	}
+	if len(code) == 6 {
+		if strings.HasPrefix(code, "6") {
+			return "sh" + code
+		}
+		if strings.HasPrefix(code, "0") || strings.HasPrefix(code, "3") {
+			return "sz" + code
+		}
+	}
+	return code
+}
+
+func trimMarketPrefix(code string) string {
+	if len(code) > 2 && (strings.HasPrefix(code, "sh") || strings.HasPrefix(code, "sz")) {
+		return code[2:]
+	}
+	return code
+}
+
+func toEastMoneySecID(code string) (string, error) {
+	switch {
+	case strings.HasPrefix(code, "sh"):
+		return fmt.Sprintf("1.%s", trimMarketPrefix(code)), nil
+	case strings.HasPrefix(code, "sz"):
+		return fmt.Sprintf("0.%s", trimMarketPrefix(code)), nil
+	default:
+		return "", fmt.Errorf("暂不支持的证券代码: %s", code)
+	}
+}
+
+func mapKlinePeriod(period string) string {
+	switch period {
+	case "week":
+		return "102"
+	case "month":
+		return "103"
+	default:
+		return "101"
+	}
+}
+
+func addTimestampParam(rawURL string) string {
+	if strings.Contains(rawURL, "?") {
+		return fmt.Sprintf("%s&_=%d", rawURL, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s?_=%d", rawURL, time.Now().UnixNano())
 }
 
 // GetMinuteData 获取分时数据（腾讯接口）
@@ -540,16 +811,9 @@ func (api *StockAPI) GetResearchReports(stockCode string) ([]models.ResearchRepo
 
 	log.Printf("[研报] 请求URL: %s", url)
 
-	resp, err := api.getClient().Get(url)
+	body, err := api.doGetWithRetry(url, "https://data.eastmoney.com/report/", nil)
 	if err != nil {
 		log.Printf("[研报] 请求失败: %v", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[研报] 读取响应失败: %v", err)
 		return nil, err
 	}
 
@@ -615,16 +879,9 @@ func (api *StockAPI) GetStockNotices(stockCode string) ([]models.StockNotice, er
 
 	log.Printf("[公告] 请求URL: %s", url)
 
-	resp, err := api.getClient().Get(url)
+	body, err := api.doGetWithRetry(url, "https://data.eastmoney.com/notices/", nil)
 	if err != nil {
 		log.Printf("[公告] 请求失败: %v", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("[公告] 读取响应失败: %v", err)
 		return nil, err
 	}
 
@@ -1434,6 +1691,15 @@ func (api *StockAPI) GetNoticeContent(stockCode string, artCode string) (string,
 		return "", fmt.Errorf("artCode为空")
 	}
 
+	fullCode := stockCode
+	if len(fullCode) == 6 {
+		if strings.HasPrefix(fullCode, "6") {
+			fullCode = "sh" + fullCode
+		} else if strings.HasPrefix(fullCode, "0") || strings.HasPrefix(fullCode, "3") {
+			fullCode = "sz" + fullCode
+		}
+	}
+
 	// 去除股票代码前缀
 	code := stockCode
 	if strings.HasPrefix(stockCode, "sh") || strings.HasPrefix(stockCode, "sz") {
@@ -1491,11 +1757,11 @@ func (api *StockAPI) GetNoticeContent(stockCode string, artCode string) (string,
 	content := notice.Content
 	if content == "" {
 		// 如果API没有返回内容，尝试获取公告PDF/HTML内容
-		content = api.fetchNoticeDetailContent(code, artCode)
+		content = api.fetchNoticeDetailContent(fullCode, artCode)
 	}
 
 	if content == "" {
-		return "", fmt.Errorf("未获取到公告内容")
+		return fmt.Sprintf("公告链接：%s\n（原文未能直接获取，请点击链接查看全文。）", fmt.Sprintf("https://data.eastmoney.com/notices/detail/%s/%s.html", fullCode, artCode)), nil
 	}
 
 	var sb strings.Builder

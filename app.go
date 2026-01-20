@@ -26,7 +26,14 @@ import (
 	"stock-ai/backend/plugin"
 	"stock-ai/backend/prompt"
 
+	"gorm.io/gorm/clause"
+
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+var (
+	logFileOnce sync.Once
+	logFile     *os.File
 )
 
 // App struct
@@ -44,7 +51,7 @@ type App struct {
 	// 自选股票价格缓存（用于提醒检查）
 	stockPriceCache     map[string]*models.StockPrice
 	stockPriceCacheLock sync.RWMutex
-	stockKLineCache     map[string][]models.KLineData
+	stockKLineCache     map[string]map[string][]models.KLineData
 	stockReportCache    map[string][]models.ResearchReport
 	stockNoticeCache    map[string][]models.StockNotice
 	stockFinancialCache map[string]*data.FinancialData
@@ -53,10 +60,16 @@ type App struct {
 	fundPriceCacheLock  sync.RWMutex
 }
 
+type klineFetchSpec struct {
+	period string
+	count  int
+}
+
 const (
-	appVersion        = "1.0.0"
-	appBuildTime      = "2025-01-15"
-	updateManifestURL = "https://gitee.com/he-jun0000/Stock-AI/raw/main/releases/version.json"
+	appVersion                = "1.0.0"
+	appBuildTime              = "2025-11-15"
+	updateManifestURL         = "https://gitee.com/he-jun0000/Stock-AI/raw/main/releases/version.json"
+	disableTradeLevelFallback = true
 )
 
 const updateScriptTemplate = `@echo off
@@ -106,6 +119,65 @@ echo [%date% %time%] %~1>>"%LOGFILE%"
 goto :eof
 `
 
+func init() {
+	setupAppLogger()
+}
+
+func setupAppLogger() {
+	logFileOnce.Do(func() {
+		logDir := filepath.Join(getUserDataDir(), "logs")
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			log.Printf("创建日志目录失败: %v", err)
+			return
+		}
+
+		logPath := filepath.Join(logDir, "app.log")
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Printf("打开日志文件失败: %v", err)
+			return
+		}
+		logFile = f
+	})
+
+	if logFile == nil {
+		return
+	}
+
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(multiWriter)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	if path := logFile.Name(); path != "" {
+		log.Printf("日志输出接管，写入: %s", path)
+	}
+}
+
+func shutdownAppLogger() {
+	if logFile != nil {
+		logFile.Close()
+	}
+}
+
+func appendTraceLog(format string, args ...interface{}) {
+	message := fmt.Sprintf(format, args...)
+	log.Printf("%s", message)
+
+	logDir := filepath.Join(getUserDataDir(), "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return
+	}
+
+	traceFile := filepath.Join(logDir, "trace.log")
+	f, err := os.OpenFile(traceFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	fmt.Fprintf(f, "[%s] %s\n", timestamp, message)
+}
+
 func getUserDataDir() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -144,7 +216,7 @@ func NewApp() *App {
 		cryptoForexAPI:      data.NewCryptoForexAPI(),
 		sentimentAPI:        data.NewSentimentAPI(),
 		stockPriceCache:     make(map[string]*models.StockPrice),
-		stockKLineCache:     make(map[string][]models.KLineData),
+		stockKLineCache:     make(map[string]map[string][]models.KLineData),
 		stockReportCache:    make(map[string][]models.ResearchReport),
 		stockNoticeCache:    make(map[string][]models.StockNotice),
 		stockFinancialCache: make(map[string]*data.FinancialData),
@@ -154,6 +226,7 @@ func NewApp() *App {
 
 // startup is called when the app starts
 func (a *App) startup(ctx context.Context) {
+	setupAppLogger()
 	a.ctx = ctx
 
 	// 初始化数据库
@@ -235,6 +308,7 @@ func (a *App) AddStock(code string) error {
 
 	// 获取股票名称
 	prices, err := a.stockAPI.GetStockPrice([]string{code})
+	appendTraceLog("[TradeLevel] price fetch %s err=%v", code, err)
 	if err != nil {
 		return err
 	}
@@ -331,7 +405,37 @@ func (a *App) GetStockPrice(codes []string) (map[string]*models.StockPrice, erro
 
 // GetKLineData 获取K线数据
 func (a *App) GetKLineData(code string, period string, count int) ([]models.KLineData, error) {
-	return a.stockAPI.GetKLineData(code, period, count)
+	code = normalizeStockCode(code)
+	if period == "" {
+		period = "daily"
+	}
+	appendTraceLog("[KLineTrace] 调用 GetKLineData code=%s period=%s count=%d", code, period, count)
+	if data, ok := a.getCachedKLines(code, period, count); ok {
+		appendTraceLog("[KLineTrace] 命中缓存 %s %s -> %d 条", code, period, len(data))
+		return data, nil
+	}
+
+	klines, err := a.stockAPI.GetKLineData(code, period, count)
+	if err != nil {
+		if cached, ok := a.getCachedKLines(code, period, count); ok {
+			appendTraceLog("[KLineTrace] 拉取失败，使用缓存数据 %s %s: %v", code, period, err)
+			return cached, nil
+		}
+		appendTraceLog("[KLineTrace] 拉取失败且无缓存 %s %s: %v", code, period, err)
+		return nil, err
+	}
+	if len(klines) == 0 {
+		if cached, ok := a.getCachedKLines(code, period, count); ok {
+			appendTraceLog("[KLineTrace] 数据为空，使用缓存数据 %s %s", code, period)
+			return cached, nil
+		}
+		appendTraceLog("[KLineTrace] 数据为空且无缓存 %s %s", code, period)
+		return nil, fmt.Errorf("K线数据为空: %s", code)
+	}
+
+	a.setKLineCache(code, period, klines)
+	appendTraceLog("[KLineTrace] 实时获取成功 %s %s -> %d 条", code, period, len(klines))
+	return cloneKLines(klines, count), nil
 }
 
 // GetMinuteData 获取分时数据
@@ -418,24 +522,59 @@ func (a *App) GetFundOverview(code string) (*models.FundOverview, error) {
 	}
 	price := priceResult[code]
 
-	detail, err := a.fundAPI.GetFundDetail(code)
-	if err != nil {
-		return nil, fmt.Errorf("获取基金信息失败: %v", err)
+	var (
+		detail                      *models.FundDetail
+		history                     []models.FundPerformancePoint
+		stockHoldings, bondHoldings []models.FundHolding
+		notices                     []models.FundNotice
+		detailErr                   error
+		historyErr                  error
+		holdingErr                  error
+		noticeErr                   error
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		detail, detailErr = a.fundAPI.GetFundDetail(code)
+	}()
+
+	go func() {
+		defer wg.Done()
+		history, historyErr = a.fundAPI.GetFundHistory(code, 120)
+	}()
+
+	go func() {
+		defer wg.Done()
+		stockHoldings, bondHoldings, holdingErr = a.fundAPI.GetFundHoldings(code)
+	}()
+
+	go func() {
+		defer wg.Done()
+		notices, noticeErr = a.fundAPI.GetFundNotices(code, 20)
+	}()
+
+	wg.Wait()
+
+	if detailErr != nil || detail == nil {
+		log.Printf("[Fund] 获取基金信息失败: %v", detailErr)
+		if fallback := a.fundAPI.BuildFallbackFundDetail(code, price); fallback != nil {
+			detail = fallback
+		} else {
+			return nil, fmt.Errorf("获取基金信息失败: %v", detailErr)
+		}
 	}
 
-	history, err := a.fundAPI.GetFundHistory(code, 120)
-	if err != nil {
-		log.Printf("[Fund] 获取历史净值失败: %v", err)
+	if historyErr != nil {
+		log.Printf("[Fund] 获取历史净值失败: %v", historyErr)
 	}
-
-	stockHoldings, bondHoldings, err := a.fundAPI.GetFundHoldings(code)
-	if err != nil {
-		log.Printf("[Fund] 获取持仓失败: %v", err)
+	if holdingErr != nil {
+		log.Printf("[Fund] 获取持仓失败: %v", holdingErr)
 	}
-
-	notices, err := a.fundAPI.GetFundNotices(code, 20)
-	if err != nil {
-		log.Printf("[Fund] 获取公告失败: %v", err)
+	if noticeErr != nil {
+		log.Printf("[Fund] 获取公告失败: %v", noticeErr)
 	}
 
 	return &models.FundOverview{
@@ -756,12 +895,14 @@ func (a *App) GetNewsList() ([]models.NewsItem, error) {
 
 // GetResearchReports 获取研报列表
 func (a *App) GetResearchReports(stockCode string) ([]models.ResearchReport, error) {
-	return a.stockAPI.GetResearchReports(stockCode)
+	code := normalizeStockCode(stockCode)
+	return a.getResearchReportsCached(code)
 }
 
 // GetStockNotices 获取公告列表
 func (a *App) GetStockNotices(stockCode string) ([]models.StockNotice, error) {
-	return a.stockAPI.GetStockNotices(stockCode)
+	code := normalizeStockCode(stockCode)
+	return a.getStockNoticesCached(code)
 }
 
 // GetLongTigerRank 获取龙虎榜
@@ -875,6 +1016,14 @@ func (a *App) GetDataPipelineStatus() (*models.DataPipelineStatus, error) {
 	return pipeline, nil
 }
 
+// FrontendTrace 允许前端写入调试日志
+func (a *App) FrontendTrace(message string) {
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+	appendTraceLog("[Frontend] %s", message)
+}
+
 func (a *App) startPriceCacheUpdater() {
 	go func() {
 		for {
@@ -936,9 +1085,7 @@ func (a *App) prefetchStockData(stockCode string, cfg *models.Config) {
 	}
 
 	if klines, err := a.stockAPI.GetKLineData(code, "daily", 120); err == nil && len(klines) > 0 {
-		a.stockDataCacheLock.Lock()
-		a.stockKLineCache[code] = klines
-		a.stockDataCacheLock.Unlock()
+		a.setKLineCache(code, "daily", klines)
 	}
 
 	if reports, err := a.stockAPI.GetResearchReports(code); err == nil {
@@ -966,6 +1113,125 @@ func (a *App) prefetchStockData(stockCode string, cfg *models.Config) {
 			a.stockDataCacheLock.Unlock()
 		}
 	}
+}
+
+type stockAnalysisData struct {
+	stock      *models.StockPrice
+	klines     []models.KLineData
+	reports    []models.ResearchReport
+	notices    []models.StockNotice
+	position   *models.Position
+	financial  *data.FinancialData
+	warmupDone bool
+}
+
+type warmupStep struct {
+	name     string
+	duration time.Duration
+	err      error
+}
+
+func (a *App) warmupStockAnalysisData(code, analysisType string, cfg *models.Config, timeout time.Duration) *stockAnalysisData {
+	result := &stockAnalysisData{}
+	var wg sync.WaitGroup
+
+	var steps []*warmupStep
+	var stepsMu sync.Mutex
+
+	addTask := func(name string, enabled bool, fn func() error) {
+		if !enabled {
+			return
+		}
+
+		step := &warmupStep{name: name}
+		stepsMu.Lock()
+		steps = append(steps, step)
+		stepsMu.Unlock()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			if err := fn(); err != nil {
+				step.err = err
+			}
+			step.duration = time.Since(start)
+			log.Printf("[Prefetch] %s 完成，耗时 %s，err=%v", name, step.duration, step.err)
+		}()
+	}
+
+	addTask("price", true, func() error {
+		stock, err := a.getPriceSnapshot(code)
+		if err == nil {
+			result.stock = stock
+		}
+		return err
+	})
+
+	addTask("kline", true, func() error {
+		klines, err := a.getKLineDataCached(code, 120)
+		if err == nil {
+			result.klines = klines
+		}
+		return err
+	})
+
+	addTask("reports", true, func() error {
+		reports, err := a.getResearchReportsCached(code)
+		if err == nil {
+			result.reports = reports
+		}
+		return err
+	})
+
+	addTask("notices", true, func() error {
+		notices, err := a.getStockNoticesCached(code)
+		if err == nil {
+			result.notices = notices
+		}
+		return err
+	})
+
+	addTask("position", true, func() error {
+		position, err := a.GetPositionByStock(code)
+		if err == nil {
+			result.position = position
+		}
+		return err
+	})
+
+	needFinancial := analysisType == "fundamental" || analysisType == "master"
+	addTask("financial", needFinancial, func() error {
+		fin, err := a.getFinancialDataCached(code, cfg)
+		if err == nil {
+			result.financial = fin
+		}
+		return err
+	})
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	start := time.Now()
+	if timeout <= 0 {
+		<-done
+		result.warmupDone = true
+		log.Printf("[Prefetch] 股票 %s 预热完成，总耗时 %s", code, time.Since(start))
+		return result
+	}
+
+	select {
+	case <-done:
+		result.warmupDone = true
+		log.Printf("[Prefetch] 股票 %s 预热完成，总耗时 %s", code, time.Since(start))
+	case <-time.After(timeout):
+		log.Printf("[Prefetch] 股票 %s 预热超过 %v，终止", code, timeout)
+	}
+
+	return result
 }
 
 func (a *App) getPriceCacheInterval() time.Duration {
@@ -1120,33 +1386,77 @@ func (a *App) getPriceSnapshot(code string) (*models.StockPrice, error) {
 }
 
 func (a *App) getKLineDataCached(code string, count int) ([]models.KLineData, error) {
-	a.stockDataCacheLock.RLock()
-	if klines, ok := a.stockKLineCache[code]; ok && len(klines) > 0 {
-		copied := cloneKLines(klines, count)
-		a.stockDataCacheLock.RUnlock()
-		return copied, nil
+	return a.getKLineDataCachedByPeriod(code, "daily", count)
+}
+
+func (a *App) getKLineDataCachedByPeriod(code, period string, count int) ([]models.KLineData, error) {
+	if klines, ok := a.getCachedKLines(code, period, count); ok {
+		log.Printf("[KLine] getKLineDataCached 命中缓存 %s %s -> %d 条", code, period, len(klines))
+		return klines, nil
 	}
-	a.stockDataCacheLock.RUnlock()
 
 	limit := count
-	if limit < 60 {
-		limit = 60
+	if min := getMinKLineFetchCount(period); limit < min {
+		limit = min
 	}
-	klines, err := a.stockAPI.GetKLineData(code, "daily", limit)
+
+	klines, err := a.stockAPI.GetKLineData(code, period, limit)
 	if err != nil {
+		if cached, ok := a.getCachedKLines(code, period, count); ok {
+			return cached, nil
+		}
 		return nil, err
 	}
 	if len(klines) > 0 {
-		a.stockDataCacheLock.Lock()
-		a.stockKLineCache[code] = klines
-		a.stockDataCacheLock.Unlock()
+		a.setKLineCache(code, period, klines)
+		return cloneKLines(klines, count), nil
 	}
-	return cloneKLines(klines, count), nil
+	if cached, ok := a.getCachedKLines(code, period, count); ok {
+		log.Printf("[KLine] getKLineDataCached 使用回退缓存 %s %s -> %d 条", code, period, len(cached))
+		return cached, nil
+	}
+	return nil, fmt.Errorf("K线数据为空: %s [%s]", code, period)
+}
+
+func getMinKLineFetchCount(period string) int {
+	switch period {
+	case "week":
+		return 60
+	case "month":
+		return 36
+	default:
+		return 60
+	}
+}
+
+func (a *App) getCachedKLines(code string, period string, count int) ([]models.KLineData, bool) {
+	a.stockDataCacheLock.RLock()
+	defer a.stockDataCacheLock.RUnlock()
+	if cache, ok := a.stockKLineCache[code]; ok {
+		if klines, ok := cache[period]; ok && len(klines) > 0 {
+			return cloneKLines(klines, count), true
+		}
+	}
+	return nil, false
+}
+
+func (a *App) setKLineCache(code string, period string, klines []models.KLineData) {
+	if len(klines) == 0 {
+		return
+	}
+	copied := make([]models.KLineData, len(klines))
+	copy(copied, klines)
+	a.stockDataCacheLock.Lock()
+	if _, ok := a.stockKLineCache[code]; !ok {
+		a.stockKLineCache[code] = make(map[string][]models.KLineData)
+	}
+	a.stockKLineCache[code][period] = copied
+	a.stockDataCacheLock.Unlock()
 }
 
 func (a *App) getResearchReportsCached(code string) ([]models.ResearchReport, error) {
 	a.stockDataCacheLock.RLock()
-	if reports, ok := a.stockReportCache[code]; ok {
+	if reports, ok := a.stockReportCache[code]; ok && len(reports) > 0 {
 		copied := make([]models.ResearchReport, len(reports))
 		copy(copied, reports)
 		a.stockDataCacheLock.RUnlock()
@@ -1156,7 +1466,26 @@ func (a *App) getResearchReportsCached(code string) ([]models.ResearchReport, er
 
 	reports, err := a.stockAPI.GetResearchReports(code)
 	if err != nil {
+		a.stockDataCacheLock.RLock()
+		if cached, ok := a.stockReportCache[code]; ok && len(cached) > 0 {
+			copied := make([]models.ResearchReport, len(cached))
+			copy(copied, cached)
+			a.stockDataCacheLock.RUnlock()
+			return copied, nil
+		}
+		a.stockDataCacheLock.RUnlock()
 		return nil, err
+	}
+	if len(reports) == 0 {
+		a.stockDataCacheLock.RLock()
+		if cached, ok := a.stockReportCache[code]; ok && len(cached) > 0 {
+			copied := make([]models.ResearchReport, len(cached))
+			copy(copied, cached)
+			a.stockDataCacheLock.RUnlock()
+			return copied, nil
+		}
+		a.stockDataCacheLock.RUnlock()
+		return reports, nil
 	}
 	a.stockDataCacheLock.Lock()
 	a.stockReportCache[code] = reports
@@ -1166,7 +1495,7 @@ func (a *App) getResearchReportsCached(code string) ([]models.ResearchReport, er
 
 func (a *App) getStockNoticesCached(code string) ([]models.StockNotice, error) {
 	a.stockDataCacheLock.RLock()
-	if notices, ok := a.stockNoticeCache[code]; ok {
+	if notices, ok := a.stockNoticeCache[code]; ok && len(notices) > 0 {
 		copied := make([]models.StockNotice, len(notices))
 		copy(copied, notices)
 		a.stockDataCacheLock.RUnlock()
@@ -1176,7 +1505,26 @@ func (a *App) getStockNoticesCached(code string) ([]models.StockNotice, error) {
 
 	notices, err := a.stockAPI.GetStockNotices(code)
 	if err != nil {
+		a.stockDataCacheLock.RLock()
+		if cached, ok := a.stockNoticeCache[code]; ok && len(cached) > 0 {
+			copied := make([]models.StockNotice, len(cached))
+			copy(copied, cached)
+			a.stockDataCacheLock.RUnlock()
+			return copied, nil
+		}
+		a.stockDataCacheLock.RUnlock()
 		return nil, err
+	}
+	if len(notices) == 0 {
+		a.stockDataCacheLock.RLock()
+		if cached, ok := a.stockNoticeCache[code]; ok && len(cached) > 0 {
+			copied := make([]models.StockNotice, len(cached))
+			copy(copied, cached)
+			a.stockDataCacheLock.RUnlock()
+			return copied, nil
+		}
+		a.stockDataCacheLock.RUnlock()
+		return notices, nil
 	}
 	a.stockDataCacheLock.Lock()
 	a.stockNoticeCache[code] = notices
@@ -1220,9 +1568,233 @@ func cloneKLines(src []models.KLineData, count int) []models.KLineData {
 	if count <= 0 || count > len(src) {
 		count = len(src)
 	}
+	start := len(src) - count
+	if start < 0 {
+		start = 0
+	}
 	result := make([]models.KLineData, count)
-	copy(result, src[:count])
+	copy(result, src[start:])
 	return result
+}
+
+const tradeLevelPriceTimeout = 5 * time.Second
+
+func (a *App) lookupStockName(code string) string {
+	var stock models.Stock
+	if err := data.GetDB().Where("code = ?", code).First(&stock).Error; err == nil {
+		if strings.TrimSpace(stock.Name) != "" {
+			return stock.Name
+		}
+	}
+
+	a.stockPriceCacheLock.RLock()
+	if cached, ok := a.stockPriceCache[code]; ok && cached != nil && strings.TrimSpace(cached.Name) != "" {
+		name := cached.Name
+		a.stockPriceCacheLock.RUnlock()
+		return name
+	}
+	a.stockPriceCacheLock.RUnlock()
+	return strings.ToUpper(code)
+}
+
+func (a *App) buildPriceFromKLines(code string, daily []models.KLineData) *models.StockPrice {
+	if len(daily) == 0 {
+		return nil
+	}
+	last := daily[len(daily)-1]
+	preClose := last.Close
+	if len(daily) > 1 {
+		preClose = daily[len(daily)-2].Close
+	}
+	change := last.Close - preClose
+	changePercent := 0.0
+	if preClose > 0 {
+		changePercent = (change / preClose) * 100
+	}
+
+	return &models.StockPrice{
+		Code:          code,
+		Name:          a.lookupStockName(code),
+		Price:         last.Close,
+		Open:          last.Open,
+		High:          last.High,
+		Low:           last.Low,
+		PreClose:      preClose,
+		Change:        change,
+		ChangePercent: changePercent,
+		Volume:        last.Volume,
+		Amount:        0,
+		UpdateTime:    last.Date,
+	}
+}
+
+func (a *App) resolveTradeLevelPrice(code string, daily []models.KLineData) (*models.StockPrice, error) {
+	prices, err := a.fetchStockPriceWithTimeout(code, tradeLevelPriceTimeout)
+	if err != nil {
+		appendTraceLog("[TradeLevel] price realtime err %s: %v", code, err)
+	} else {
+		appendTraceLog("[TradeLevel] price realtime fetch %s -> %d", code, len(prices))
+	}
+	if price := prices[code]; price != nil {
+		appendTraceLog("[TradeLevel] price realtime hit %s", code)
+		return price, nil
+	}
+	if err == nil && len(prices) == 0 {
+		appendTraceLog("[TradeLevel] price realtime empty %s", code)
+	} else if err == nil {
+		appendTraceLog("[TradeLevel] price realtime miss %s", code)
+	}
+
+	if disableTradeLevelFallback {
+		return nil, fmt.Errorf("实时行情不可用，请稍后再试: %v", err)
+	}
+
+	a.stockPriceCacheLock.RLock()
+	if cached, ok := a.stockPriceCache[code]; ok && cached != nil {
+		a.stockPriceCacheLock.RUnlock()
+		appendTraceLog("[TradeLevel] price fallback cache %s", code)
+		return cached, nil
+	}
+	a.stockPriceCacheLock.RUnlock()
+
+	if fallback := a.buildPriceFromKLines(code, daily); fallback != nil {
+		appendTraceLog("[TradeLevel] price fallback kline %s", code)
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("无法获取股票实时价格，请稍后再试")
+}
+
+func (a *App) fetchStockPriceWithTimeout(code string, timeout time.Duration) (map[string]*models.StockPrice, error) {
+	type priceResult struct {
+		price  *models.StockPrice
+		source string
+		err    error
+	}
+
+	sources := []struct {
+		name  string
+		fetch func([]string) (map[string]*models.StockPrice, error)
+	}{
+		{"Primary", a.stockAPI.GetStockPrice},
+		{"Tencent", a.stockAPI.GetStockPriceFromTencent},
+		{"Eastmoney", a.stockAPI.GetStockPriceFromEastmoney},
+		{"Netease", a.stockAPI.GetStockPriceFromNetease},
+		{"Sohu", a.stockAPI.GetStockPriceFromSohu},
+		{"Xueqiu", a.stockAPI.GetStockPriceFromXueqiu},
+		{"Baidu", a.stockAPI.GetStockPriceFromBaidu},
+		{"Hexun", a.stockAPI.GetStockPriceFromHexun},
+	}
+
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+
+	resultCh := make(chan priceResult, len(sources))
+
+	var wg sync.WaitGroup
+	for _, src := range sources {
+		src := src
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					select {
+					case <-ctx.Done():
+					case resultCh <- priceResult{err: fmt.Errorf("panic: %v", r), source: src.name}:
+					}
+				}
+			}()
+			prices, err := src.fetch([]string{code})
+			res := priceResult{source: src.name}
+			if err != nil {
+				res.err = err
+			} else if prices != nil {
+				if price := prices[code]; price != nil {
+					res.price = price
+				} else {
+					res.err = fmt.Errorf("%s 返回空数据", src.name)
+				}
+			} else {
+				res.err = fmt.Errorf("%s 未返回数据", src.name)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case resultCh <- res:
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				lastErr = fmt.Errorf("所有数据源均超时或无结果")
+			}
+			return nil, lastErr
+		case res, ok := <-resultCh:
+			if !ok {
+				if lastErr == nil {
+					lastErr = fmt.Errorf("所有数据源均无结果")
+				}
+				return nil, lastErr
+			}
+			if res.price != nil {
+				appendTraceLog("[TradeLevel] price realtime via %s", res.source)
+				cancel()
+				return map[string]*models.StockPrice{code: res.price}, nil
+			}
+			if res.err != nil {
+				lastErr = res.err
+				appendTraceLog("[TradeLevel] price source err %s %s: %v", code, res.source, res.err)
+			}
+		}
+	}
+}
+
+func logTradeLevelFail(code, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	appendTraceLog("[TradeLevel] fail %s: %s", code, msg)
+}
+
+func (a *App) PrefetchTradeLevelData(code string) {
+	code = normalizeStockCode(code)
+	appendTraceLog("[TradeLevel] Prefetch request %s", code)
+	if code == "" {
+		return
+	}
+	go func(stockCode string) {
+		log.Printf("[Prefetch] ?? %s ?????K???", stockCode)
+		specs := []klineFetchSpec{
+			{period: "daily", count: 240},
+			{period: "week", count: 180},
+			{period: "month", count: 180},
+		}
+		for _, spec := range specs {
+			if _, err := a.getKLineDataCachedByPeriod(stockCode, spec.period, spec.count); err != nil {
+				log.Printf("[Prefetch] %s %s ????: %v", stockCode, spec.period, err)
+				appendTraceLog("[TradeLevel] Prefetch fail %s %s: %v", stockCode, spec.period, err)
+			} else {
+				appendTraceLog("[TradeLevel] Prefetch hit %s %s", stockCode, spec.period)
+			}
+		}
+		log.Printf("[Prefetch] ?? %s ???K???", stockCode)
+		appendTraceLog("[TradeLevel] Prefetch done %s", stockCode)
+	}(code)
 }
 
 func (a *App) clearStockCaches(code string) {
@@ -1253,6 +1825,68 @@ func (a *App) fetchFinancialData(code string, cfg *models.Config) (*data.Financi
 // ClearCache 清除缓存
 func (a *App) ClearCache() {
 	data.GetRequestManager().ClearAllCache()
+}
+
+func (a *App) getProAnalysisCache(code, analysisType, masterStyle string) *models.ProAnalysisCache {
+	if code == "" {
+		return nil
+	}
+	code = normalizeStockCode(code)
+
+	var cache models.ProAnalysisCache
+	query := data.GetDB().Where("stock_code = ? AND analysis_type = ? AND master_style = ?", code, analysisType, masterStyle)
+	if err := query.Order("updated_at DESC").First(&cache).Error; err != nil {
+		return nil
+	}
+	return &cache
+}
+
+func (a *App) saveProAnalysisCache(code, analysisType, masterStyle, content string) {
+	code = normalizeStockCode(code)
+	if code == "" {
+		return
+	}
+	text := strings.TrimSpace(content)
+	if text == "" {
+		return
+	}
+
+	cache := models.ProAnalysisCache{
+		StockCode:    code,
+		AnalysisType: analysisType,
+		MasterStyle:  masterStyle,
+		Content:      text,
+		UpdatedAt:    time.Now(),
+	}
+
+	if err := data.GetDB().Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "stock_code"},
+			{Name: "analysis_type"},
+			{Name: "master_style"},
+		},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"content":    cache.Content,
+			"updated_at": cache.UpdatedAt,
+		}),
+	}).Create(&cache).Error; err != nil {
+		log.Printf("[AI分析] 缓存写入失败: %v", err)
+	}
+}
+
+// GetProAnalysisCache 返回指定股票/类型的大师分析缓存
+func (a *App) GetProAnalysisCache(code, analysisType, masterStyle string) *models.ProAnalysisCache {
+	code = normalizeStockCode(code)
+	if code == "" {
+		return nil
+	}
+	if cache := a.getProAnalysisCache(code, analysisType, masterStyle); cache != nil {
+		return cache
+	}
+	if masterStyle != "" {
+		return a.getProAnalysisCache(code, analysisType, "")
+	}
+	return nil
 }
 
 // ========== 系统相关 ==========
@@ -1599,7 +2233,7 @@ func (a *App) AIChat(request models.AIChatRequest) (*models.AIChatResponse, erro
 	}
 
 	// 调用AI
-	content, err := a.aiClient.Chat(messages)
+	content, err := a.aiClient.ChatWithTimeout(messages, 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("AI调用失败: %v", err)
 	}
@@ -1755,7 +2389,7 @@ func (a *App) AIAnalyzeStock(code string) (*models.AIChatResponse, error) {
 		{Role: "user", Content: prompt},
 	}
 
-	content, err := a.aiClient.Chat(messages)
+	content, err := a.aiClient.ChatWithTimeout(messages, 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("AI分析失败: %v", err)
 	}
@@ -1840,6 +2474,93 @@ func (a *App) AIAnalyzeStockStream(code string) error {
 	}()
 
 	return nil
+}
+
+// AIAnalyzeTradeLevels 计算AI买卖区间
+func (a *App) AIAnalyzeTradeLevels(code string) (*models.TradeLevelResult, error) {
+	code = normalizeStockCode(code)
+	appendTraceLog("[TradeLevel] start %s", code)
+
+	var config models.Config
+	if err := data.GetDB().First(&config).Error; err != nil {
+		logTradeLevelFail(code, "获取配置失败: %v", err)
+		return nil, fmt.Errorf("获取配置失败: %v", err)
+	}
+	if !config.AiEnabled {
+		logTradeLevelFail(code, "AI功能未启用")
+		return nil, fmt.Errorf("AI功能未启用，请在设置中开启")
+	}
+	if config.AiApiKey == "" {
+		logTradeLevelFail(code, "缺少AI API Key")
+		return nil, fmt.Errorf("请先配置AI API Key")
+	}
+	if a.aiClient == nil {
+		a.aiClient = data.NewAIClient(&config)
+	}
+
+	specs := []klineFetchSpec{
+		{period: "daily", count: 180},
+		{period: "week", count: 180},
+		{period: "month", count: 180},
+	}
+
+	results := make(map[string][]models.KLineData, len(specs))
+	appendTraceLog("[TradeLevel] fetching K? %s", code)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, spec := range specs {
+		wg.Add(1)
+		go func(s klineFetchSpec) {
+			defer wg.Done()
+			klines, err := a.getKLineDataCachedByPeriod(code, s.period, s.count)
+			if err != nil {
+				log.Printf("[AI] 获取 %s K线失败: %v", s.period, err)
+				return
+			}
+			mu.Lock()
+			results[s.period] = klines
+			mu.Unlock()
+		}(spec)
+	}
+	wg.Wait()
+	appendTraceLog("[TradeLevel] K??? %s ?=%d ?=%d ?=%d", code, len(results["daily"]), len(results["week"]), len(results["month"]))
+
+	daily := results["daily"]
+	weekly := results["week"]
+	monthly := results["month"]
+	if len(daily) == 0 {
+		logTradeLevelFail(code, "日线数据为空，无法生成AI提示")
+		return nil, fmt.Errorf("暂时无法获取该股票的K线数据，请稍后重试")
+	}
+
+	stock, err := a.resolveTradeLevelPrice(code, daily)
+	if err != nil {
+		logTradeLevelFail(code, "获取价格失败: %v", err)
+		return nil, err
+	}
+
+	prompt := data.BuildTradeLevelPrompt(stock, daily, weekly, monthly)
+	appendTraceLog("[TradeLevel] prompt ready %s", code)
+	messages := []data.ChatMessage{
+		{Role: "system", Content: data.BuildChatSystemPrompt()},
+		{Role: "user", Content: prompt},
+	}
+
+	appendTraceLog("[TradeLevel] call AI %s", code)
+	content, err := a.aiClient.ChatWithTimeout(messages, 30*time.Second)
+	if err != nil {
+		logTradeLevelFail(code, "AI调用失败: %v", err)
+		return nil, fmt.Errorf("AI计算失败: %v", err)
+	}
+
+	result, err := data.ParseTradeLevelResponse(content)
+	if err != nil {
+		appendTraceLog("[TradeLevel] parse fail %s: %v", code, err)
+		logTradeLevelFail(code, "AI结果解析失败: %v", err)
+		return nil, err
+	}
+	appendTraceLog("[TradeLevel] success %s", code)
+	return result, nil
 }
 
 // AIAnalyzeFundStream AI分析基金（流式）
@@ -2321,34 +3042,87 @@ func (a *App) AIAnalyzeByTypeStream(code string, analysisType string, masterStyl
 
 	a.aiClient = data.NewAIClient(&config)
 
-	go func() {
-		// 获取股票数据
-		wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", "正在获取股票数据...\n\n")
+	// 为确保分析基于最新行情，先强制刷新该股票的行情/财务缓存
+	a.prefetchStockData(code, &config)
 
-		stock, err := a.getPriceSnapshot(code)
-		if err != nil {
+	preloadChan := make(chan *stockAnalysisData, 1)
+	go func() {
+		preloadChan <- a.warmupStockAnalysisData(code, analysisType, &config, 5*time.Second)
+	}()
+
+	go func(preloadResult <-chan *stockAnalysisData, stockCode, aType, style string) {
+		wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", "AI已开始准备数据，稍后将持续输出，请勿关闭窗口...\n\n")
+
+		var preloaded *stockAnalysisData
+		select {
+		case preloaded = <-preloadResult:
+		case <-time.After(300 * time.Millisecond):
+			preloaded = &stockAnalysisData{}
+			go func() {
+				<-preloadResult
+			}()
+		}
+		if preloaded == nil {
+			preloaded = &stockAnalysisData{}
+		}
+
+		stock := preloaded.stock
+		if stock == nil {
+			var err error
+			stock, err = a.getPriceSnapshot(stockCode)
+			if err != nil {
+				wailsRuntime.EventsEmit(a.ctx, "ai-analysis-error", "获取股票价格失败")
+				return
+			}
+		}
+
+		klines := preloaded.klines
+		if len(klines) == 0 {
+			var err error
+			klines, err = a.getKLineDataCached(code, 60)
+			if err != nil {
+				log.Printf("[AI分析] 获取K线失败: %v", err)
+			}
+		} else if len(klines) > 60 {
+			klines = cloneKLines(klines, 60)
+		}
+
+		reports := preloaded.reports
+		if reports == nil {
+			if r, err := a.getResearchReportsCached(code); err == nil {
+				reports = r
+			}
+		}
+
+		notices := preloaded.notices
+		if notices == nil {
+			if n, err := a.getStockNoticesCached(code); err == nil {
+				notices = n
+			}
+		}
+
+		position := preloaded.position
+		if position == nil {
+			position, _ = a.GetPositionByStock(code)
+		}
+
+		var financialData *data.FinancialData
+		if aType == "fundamental" || aType == "master" {
+			financialData = preloaded.financial
+			if financialData == nil {
+				wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", "正在获取财务数据...\n\n")
+				financialData, _ = a.getFinancialDataCached(stockCode, &config)
+			}
+		}
+
+		if stock == nil {
 			wailsRuntime.EventsEmit(a.ctx, "ai-analysis-error", "获取股票价格失败")
 			return
 		}
 
-		// 获取K线数据
-		klines, _ := a.getKLineDataCached(code, 60)
-		// 获取研报
-		reports, _ := a.getResearchReportsCached(code)
-		// 获取公告
-		notices, _ := a.getStockNoticesCached(code)
-		// 获取持仓信息
-		position, _ := a.GetPositionByStock(code)
-		// 获取财务数据（用于基本面分析）
-		var financialData *data.FinancialData
-		if analysisType == "fundamental" || analysisType == "master" {
-			wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", "正在获取财务数据...\n\n")
-			financialData, _ = a.getFinancialDataCached(code, &config)
-		}
-
 		// 构建分析提示词
 		var prompt string
-		switch analysisType {
+		switch aType {
 		case "fundamental":
 			prompt = buildFundamentalPrompt(stock, reports, notices, financialData)
 		case "technical":
@@ -2356,7 +3130,7 @@ func (a *App) AIAnalyzeByTypeStream(code string, analysisType string, masterStyl
 		case "sentiment":
 			prompt = buildSentimentPrompt(stock, reports, notices)
 		case "master":
-			prompt = buildMasterPrompt(stock, klines, reports, masterStyle, financialData)
+			prompt = buildMasterPrompt(stock, klines, reports, style, financialData)
 		default:
 			prompt = data.BuildStockAnalysisPrompt(stock, klines, reports, notices)
 		}
@@ -2367,7 +3141,7 @@ func (a *App) AIAnalyzeByTypeStream(code string, analysisType string, masterStyl
 		}
 
 		messages := []data.ChatMessage{
-			{Role: "system", Content: getAnalysisSystemPrompt(analysisType, masterStyle)},
+			{Role: "system", Content: getAnalysisSystemPrompt(aType, style)},
 			{Role: "user", Content: prompt},
 		}
 
@@ -2379,11 +3153,14 @@ func (a *App) AIAnalyzeByTypeStream(code string, analysisType string, masterStyl
 			return
 		}
 
+		var builder strings.Builder
 		for content := range ch {
+			builder.WriteString(content)
 			wailsRuntime.EventsEmit(a.ctx, "ai-analysis-stream", content)
 		}
 		wailsRuntime.EventsEmit(a.ctx, "ai-analysis-done", "")
-	}()
+		go a.saveProAnalysisCache(stockCode, aType, style, builder.String())
+	}(preloadChan, code, analysisType, masterStyle)
 
 	return nil
 }
@@ -2830,13 +3607,19 @@ func buildFundamentalPrompt(stock *models.StockPrice, reports []models.ResearchR
 	}
 
 	sb.WriteString(`
-请从以下几个方面进行基本面分析：
-1. **公司概况**：主营业务、行业地位
-2. **财务分析**：根据财务数据分析盈利能力、偿债能力、成长性
-3. **估值分析**：结合PE、PB等指标判断当前估值是否合理
-4. **竞争优势**：公司的护城河和核心竞争力
-5. **风险因素**：需要关注的风险点
-6. **综合评估**：基于基本面的分析观点
+请从以下方面进行基本面分析，并严格使用 Markdown 排版：
+1. **公司概况**：主营业务、所处行业
+2. **财务分析**：盈利能力、成长性、现金流、偿债能力
+3. **估值分析**：结合PE、PB、PS等指标，判断估值安全边际
+4. **竞争优势**：行业壁垒、护城河、管理层特质
+5. **风险因素**：关键风险及触发条件
+6. **操作建议/观点**：基于以上分析给出明确结论
+
+输出格式要求：
+- 顶部使用“### 综合结论”，随后依次使用“### 公司概况”“### 财务分析”等标题
+- 关键条目使用无序/有序列表展示，重要数字加粗
+- 若需要引用或提醒，请使用 Markdown 引用语法
+- 末尾必须包含“### 风险提示”和“### 操作建议”两个段落
 
 重要声明：以上分析由AI生成，仅供学习研究参考，不构成任何投资建议。
 `)
@@ -2877,13 +3660,18 @@ func buildTechnicalPrompt(stock *models.StockPrice, klines []models.KLineData) s
 	}
 
 	sb.WriteString(`
-请从以下几个方面进行技术面分析：
-1. **趋势分析**：当前处于什么趋势（上升/下降/横盘）
-2. **K线形态**：是否有明显的K线形态信号
-3. **支撑压力**：关键的支撑位和压力位
-4. **成交量分析**：量价配合情况
-5. **技术指标**：根据K线数据推断MACD、KDJ等指标状态
-6. **技术观点**：基于技术面的分析观点
+请从以下方面进行技术面分析，保持与 AI 分析一致的 Markdown 排版：
+1. **趋势分析**：上升/下降/震荡，配合均线结构
+2. **K线形态**：近期是否出现明显形态信号
+3. **支撑压力**：关键价位、突破/失守条件
+4. **成交量与资金**：量价配合、主力动向
+5. **技术指标推断**：MACD、KDJ、布林带等的状态
+6. **策略建议**：入场、止盈止损、持仓建议
+
+输出格式要求：
+- 按“### 趋势分析”“### 技术指标”等标题顺序展开
+- 结论采用列表展示，关键价位用**加粗**
+- 结尾需包含“### 风险提示”“### 操作建议”两节
 
 重要声明：以上分析由AI生成，仅供学习研究参考，不构成任何投资建议，不作为买卖依据。
 `)
@@ -2925,13 +3713,18 @@ func buildSentimentPrompt(stock *models.StockPrice, reports []models.ResearchRep
 	}
 
 	sb.WriteString(`
-请从以下几个方面进行情绪面分析：
-1. **市场情绪**：当前市场对该股票的整体情绪
-2. **机构态度**：机构研报的评级变化和观点
-3. **资金动向**：根据成交量判断资金流向
-4. **消息面影响**：近期公告和新闻的影响
-5. **市场热度**：是否处于市场热点
-6. **情绪观点**：基于情绪面的分析观点
+请从以下方面进行情绪面分析，并使用 Markdown 标题/列表美化排版：
+1. **市场情绪**：整体风险偏好、恐慌或亢奋程度
+2. **机构态度**：研报、评级、持仓动向
+3. **资金动向**：成交量、北向/南向、游资活跃度
+4. **消息面影响**：公告、新闻、政策事件
+5. **热点位置**：板块热度、题材联动
+6. **情绪观点**：总结情绪拐点与策略建议
+
+输出格式要求：
+- 依次使用“### 市场情绪”“### 机构态度”等标题
+- 每个标题下用列表 bullet 说明细节，重要信息加粗
+- 最后补充“### 风险提示”“### 操作建议”
 
 重要声明：以上分析由AI生成，仅供学习研究参考，不构成任何投资建议。
 `)
@@ -3004,14 +3797,17 @@ func buildMasterPrompt(stock *models.StockPrice, klines []models.KLineData, repo
 	}
 
 	sb.WriteString(fmt.Sprintf(`
-请以%s的投资理念和分析方法，对这只股票进行深度分析：
-1. 用%s的视角评估这只股票
-2. 分析是否符合%s的选股标准
-3. 指出%s可能关注的要点
-4. 给出%s风格的分析观点
-5. 提示潜在的风险
+请以%s的投资理念和分析方法，对这只股票进行深度分析，并保持 Markdown 结构：
+1. 用%s的视角评估业务模式、财务安全边际
+2. 分析是否符合%s的选股或交易标准
+3. 指出%s会重点关注的指标或信号
+4. 给出%s风格的操作建议与仓位策略
+5. 明确潜在风险，并在最后总结“### 综合结论”“### 风险提示”“### 操作建议”
 
-请用%s的口吻和思维方式进行分析。
+输出格式要求：
+- 逐段使用“### 综合结论”“### 投资逻辑”“### 估值与安全边际”“### 风险提示”等标题
+- 列表突出核心观点，引用大师名言时使用引用语法
+- 语言保持%s的口吻
 
 重要声明：以上分析由AI模拟生成，仅供学习研究和娱乐参考，不代表真实人物观点，不构成任何投资建议。
 `, name, name, name, name, name, name))

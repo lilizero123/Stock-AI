@@ -14,6 +14,8 @@ export function AIAnalyzeStock(arg1:string):Promise<models.AIChatResponse>;
 
 export function AIAnalyzeStockStream(arg1:string):Promise<void>;
 
+export function AIAnalyzeTradeLevels(arg1:string):Promise<models.TradeLevelResult>;
+
 export function AIChat(arg1:models.AIChatRequest):Promise<models.AIChatResponse>;
 
 export function AIChatStream(arg1:models.AIChatRequest):Promise<void>;
@@ -109,6 +111,8 @@ export function ExportPrompt(arg1:string,arg2:string):Promise<string>;
 export function FetchQuoteFromAllPlugins(arg1:string):Promise<plugin.DatasourceResult>;
 
 export function FetchQuoteFromPlugin(arg1:string,arg2:string):Promise<plugin.DatasourceResult>;
+
+export function FrontendTrace(arg1:string):Promise<void>;
 
 export function GetAIAnalysisHistory():Promise<Array<models.AIAnalysisResult>>;
 
@@ -210,6 +214,8 @@ export function GetPositionHistory():Promise<Array<models.Position>>;
 
 export function GetPositions():Promise<Array<models.Position>>;
 
+export function GetProAnalysisCache(arg1:string,arg2:string,arg3:string):Promise<models.ProAnalysisCache>;
+
 export function GetPrompt(arg1:string,arg2:string):Promise<prompt.PromptInfo>;
 
 export function GetPromptTypes():Promise<Array<any>>;
@@ -257,6 +263,8 @@ export function OpenPluginsDir():Promise<void>;
 export function OpenPromptsDir():Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
+
+export function PrefetchTradeLevelData(arg1:string):Promise<void>;
 
 export function RefreshPlugins():Promise<number|Array<string>>;
 

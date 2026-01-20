@@ -1356,6 +1356,50 @@ export namespace models {
 		    return a;
 		}
 	}
+	export class ProAnalysisCache {
+	    id: number;
+	    stockCode: string;
+	    analysisType: string;
+	    masterStyle: string;
+	    content: string;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    updatedAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProAnalysisCache(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.stockCode = source["stockCode"];
+	        this.analysisType = source["analysisType"];
+	        this.masterStyle = source["masterStyle"];
+	        this.content = source["content"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.updatedAt = this.convertValues(source["updatedAt"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	
 	export class ResearchReport {
 	    title: string;
@@ -1503,6 +1547,58 @@ export namespace models {
 	        this.artCode = source["artCode"];
 	        this.url = source["url"];
 	    }
+	}
+	export class TradeLevelDetail {
+	    buy: number;
+	    sell: number;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TradeLevelDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.buy = source["buy"];
+	        this.sell = source["sell"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class TradeLevelResult {
+	    shortTerm: TradeLevelDetail;
+	    midTerm: TradeLevelDetail;
+	    longTerm: TradeLevelDetail;
+	    raw: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TradeLevelResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.shortTerm = this.convertValues(source["shortTerm"], TradeLevelDetail);
+	        this.midTerm = this.convertValues(source["midTerm"], TradeLevelDetail);
+	        this.longTerm = this.convertValues(source["longTerm"], TradeLevelDetail);
+	        this.raw = source["raw"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class USStock {
 	    id: number;

@@ -3,6 +3,7 @@ package data
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,6 +115,21 @@ func (c *AIClient) getAPIConfig() (baseURL, apiKey, model string) {
 
 // Chat 发送聊天请求（非流式）
 func (c *AIClient) Chat(messages []ChatMessage) (string, error) {
+	return c.ChatWithTimeout(messages, 60*time.Second)
+}
+
+// ChatWithTimeout 允许自定义超时时间的聊天请求
+func (c *AIClient) ChatWithTimeout(messages []ChatMessage, timeout time.Duration) (string, error) {
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+	}
+	return c.chatWithContext(ctx, messages)
+}
+
+func (c *AIClient) chatWithContext(ctx context.Context, messages []ChatMessage) (string, error) {
 	baseURL, apiKey, model := c.getAPIConfig()
 
 	reqBody := ChatRequest{
@@ -129,7 +145,7 @@ func (c *AIClient) Chat(messages []ChatMessage) (string, error) {
 		return "", fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -426,6 +442,77 @@ func BuildFundAnalysisPrompt(detail *models.FundDetail, price *models.FundPrice,
 `)
 
 	return sb.String()
+}
+
+// BuildTradeLevelPrompt 构建AI买卖区间提示词
+func BuildTradeLevelPrompt(stock *models.StockPrice, daily, weekly, monthly []models.KLineData) string {
+	var sb strings.Builder
+	sb.WriteString("你是一名经验丰富的量化交易顾问，需要根据提供的多周期数据给出短中长周期的买入价与卖出价。\n")
+	sb.WriteString("请重点参考日线、周线、月线的趋势，结合均线、成交量、RSI、MACD、KDJ(LDJ)、KD、BRAR、DMI、CR、PSY/PSYMA、DMA/AMA、TRIX/MATRIX等指标以及近30周期的高低区间，判断合理的支撑位与压力位。\n\n")
+
+	sb.WriteString("## 当前行情\n")
+	sb.WriteString(fmt.Sprintf("- 代码：%s\n", stock.Code))
+	sb.WriteString(fmt.Sprintf("- 名称：%s\n", stock.Name))
+	sb.WriteString(fmt.Sprintf("- 最新价：%.2f\n", stock.Price))
+	sb.WriteString(fmt.Sprintf("- 当日涨跌幅：%.2f%%\n", stock.ChangePercent))
+	sb.WriteString(fmt.Sprintf("- 成交量：%d\n", stock.Volume))
+	sb.WriteString(fmt.Sprintf("- 成交额：%.2f\n\n", stock.Amount))
+
+	sb.WriteString(summarizeKLinePeriod("日线", daily))
+	sb.WriteString(summarizeKLinePeriod("周线", weekly))
+	sb.WriteString(summarizeKLinePeriod("月线", monthly))
+
+	sb.WriteString(`请根据以上数据，判断短期（1-5个交易日）、中期（1-4周）、长期（1-3个月）的合理买入价位和卖出价位。
+- 买入价位代表相对安全或具备吸引力的建仓区间
+- 卖出价位代表止盈/减仓区间
+- 若行情极端，可给出合理区间或提示暂缓操作
+- 简要说明判断依据（例如依据的均线、MACD信号、支撑压力等）
+
+请严格以纯JSON格式返回（不要附加任何文字或代码块），格式如下：
+{
+  "shortTerm": { "buy": 0.0, "sell": 0.0, "reason": "说明" },
+  "midTerm": { "buy": 0.0, "sell": 0.0, "reason": "说明" },
+  "longTerm": { "buy": 0.0, "sell": 0.0, "reason": "说明" }
+}
+
+所有价格保留两位小数，如无法给出价格请填0但说明原因。`)
+
+	return sb.String()
+}
+
+// ParseTradeLevelResponse 解析AI返回的买卖区间
+func ParseTradeLevelResponse(resp string) (*models.TradeLevelResult, error) {
+	jsonStr := extractJSONBlock(resp)
+	if jsonStr == "" {
+		return nil, fmt.Errorf("AI未返回有效的JSON结果")
+	}
+	var result models.TradeLevelResult
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return nil, fmt.Errorf("解析AI输出失败: %w", err)
+	}
+	result.Raw = strings.TrimSpace(resp)
+	return &result, nil
+}
+
+func extractJSONBlock(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "```") {
+		text = strings.TrimPrefix(text, "```json")
+		text = strings.TrimPrefix(text, "```JSON")
+		text = strings.TrimPrefix(text, "```")
+	}
+	if strings.HasSuffix(text, "```") {
+		text = strings.TrimSuffix(text, "```")
+	}
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start == -1 || end <= start {
+		return ""
+	}
+	return text[start : end+1]
 }
 
 // BuildChatSystemPrompt 构建聊天系统提示词

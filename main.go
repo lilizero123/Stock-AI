@@ -14,6 +14,7 @@ var assets embed.FS
 func main() {
 	// Create an instance of the app structure
 	app := NewApp()
+	defer shutdownAppLogger()
 
 	// Create application with options
 	err := wails.Run(&options.App{

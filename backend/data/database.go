@@ -54,6 +54,7 @@ func InitDB() error {
 		&models.FundPosition{},
 		&models.AIMessage{},
 		&models.AIAnalysisResult{},
+		&models.ProAnalysisCache{},
 		// 新增：全球市场相关模型
 		&models.Futures{},
 		&models.USStock{},

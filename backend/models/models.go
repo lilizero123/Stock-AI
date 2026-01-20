@@ -44,6 +44,21 @@ type KLineData struct {
 	Code   string  `json:"code"`
 }
 
+// TradeLevelDetail AI给出的买卖区间
+type TradeLevelDetail struct {
+	Buy    float64 `json:"buy"`
+	Sell   float64 `json:"sell"`
+	Reason string  `json:"reason"`
+}
+
+// TradeLevelResult AI交易区间输出
+type TradeLevelResult struct {
+	ShortTerm TradeLevelDetail `json:"shortTerm"`
+	MidTerm   TradeLevelDetail `json:"midTerm"`
+	LongTerm  TradeLevelDetail `json:"longTerm"`
+	Raw       string           `json:"raw"`
+}
+
 // MinuteData 分时数据
 type MinuteData struct {
 	Time          string  `json:"time"`
@@ -329,6 +344,17 @@ type AIAnalysisResult struct {
 	Analysis   string    `gorm:"type:text" json:"analysis"`
 	Suggestion string    `gorm:"size:20" json:"suggestion"` // buy, hold, sell
 	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// ProAnalysisCache 专业分析缓存，保证5秒内可出结果
+type ProAnalysisCache struct {
+	ID           uint      `gorm:"primarykey" json:"id"`
+	StockCode    string    `gorm:"size:20;index:idx_pro_cache,unique" json:"stockCode"`
+	AnalysisType string    `gorm:"size:20;index:idx_pro_cache,unique" json:"analysisType"`
+	MasterStyle  string    `gorm:"size:30;index:idx_pro_cache,unique" json:"masterStyle"`
+	Content      string    `gorm:"type:text" json:"content"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // AIChatRequest AI聊天请求
